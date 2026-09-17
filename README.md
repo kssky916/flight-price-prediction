@@ -1,4 +1,4 @@
-# flight-price-prediction
+# Flight-Price-Prediction
 # 항공권 가격 상승 위험도 및 구매 타이밍 안내 서비스
 
 ## 프로젝트 개요
