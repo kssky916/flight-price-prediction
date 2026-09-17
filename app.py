@@ -20,20 +20,60 @@ st.set_page_config(
 )
 
 
+# =========================
+# Helper
+# =========================
+
 def get_risk_badge(risk_level: str) -> str:
     if risk_level == "높음":
-        return "🔴 높음"
+        return "🔴 구매를 미루기 위험한 편"
     if risk_level == "보통":
-        return "🟠 보통"
-    return "🟢 낮음"
+        return "🟠 며칠 더 확인 필요"
+    return "🟢 비교적 여유 있음"
 
 
-def get_recommendation_message(recommendation: str) -> str:
+def get_plain_recommendation(recommendation: str) -> str:
     if recommendation == "빠른 구매 검토":
-        return "일정이 고정되어 있다면 빠른 구매를 검토할 수 있습니다."
+        return "일정이 고정되어 있다면 지금 가격을 확인하고 구매를 검토하는 편이 좋습니다."
     if recommendation == "가격 변동 지속 확인":
-        return "가격 변동을 며칠 더 확인하면서 구매 시점을 판단하는 것이 적절합니다."
-    return "현재 조건에서는 급하게 구매하기보다 추가 확인 후 결정할 수 있습니다."
+        return "지금 바로 결정하기보다 며칠간 가격 변동을 더 확인하는 것이 좋습니다."
+    return "현재 조건에서는 급하게 구매하지 않고 조금 더 지켜봐도 되는 상황입니다."
+
+
+def get_risk_explanation(risk_level: str) -> str:
+    if risk_level == "높음":
+        return (
+            "여행 수요가 몰리거나, 운항편 공급이 충분하지 않거나, 연휴와 가까운 조건이 겹쳐 "
+            "앞으로 항공권 선택지가 줄거나 가격이 불리해질 가능성이 큰 상태입니다."
+        )
+    if risk_level == "보통":
+        return (
+            "일부 가격 상승 요인은 있지만, 지금 바로 구매해야 할 정도로 강한 위험 신호만 있는 것은 아닙니다. "
+            "가격을 며칠 더 확인하면서 판단할 수 있는 상태입니다."
+        )
+    return (
+        "현재 입력된 조건에서는 가격이 불리해질 만한 요인이 크지 않습니다. "
+        "일정에 여유가 있다면 추가 비교 후 구매를 결정할 수 있습니다."
+    )
+
+
+def get_top_factor_message(factors: dict) -> str:
+    sorted_factors = sorted(
+        factors.values(),
+        key=lambda item: item["score"],
+        reverse=True
+    )
+
+    top_factors = [
+        factor["factor_name"]
+        for factor in sorted_factors
+        if factor["score"] >= 3
+    ]
+
+    if not top_factors:
+        return "현재 조건에서는 특별히 강한 위험 요인이 확인되지 않았습니다."
+
+    return f"이번 판단에 가장 크게 영향을 준 요인은 **{', '.join(top_factors[:3])}**입니다."
 
 
 def build_route_name(departure_airport: str, arrival_airport: str) -> str:
@@ -86,19 +126,36 @@ def build_sample_input(
     }
 
 
-st.title("LLM 기반 항공권 구매 타이밍 의사결정 지원 서비스")
+def show_risk_summary_message(risk: dict) -> None:
+    if risk["risk_level"] == "높음":
+        st.warning(risk["summary"])
+    elif risk["risk_level"] == "보통":
+        st.info(risk["summary"])
+    else:
+        st.success(risk["summary"])
+
+
+# =========================
+# Header
+# =========================
+
+st.title("항공권, 지금 사야 할까?")
 
 st.caption(
-    "공공데이터 기반 수요·공급·연휴·환율·운항 리스크를 활용해 "
-    "항공권 가격 상승 위험도와 구매 타이밍 판단을 지원합니다."
+    "공공데이터 기반으로 여행 수요, 운항편 공급, 연휴, 환율, 운항 상황을 분석해 "
+    "항공권 구매를 미뤄도 되는지 판단합니다."
 )
 
 st.divider()
 
 
-st.sidebar.title("분석 조건 입력")
+# =========================
+# Sidebar
+# =========================
 
-st.sidebar.subheader("사용자 여행 조건")
+st.sidebar.title("여행 조건 입력")
+
+st.sidebar.subheader("기본 여행 정보")
 
 original_text = st.sidebar.text_area(
     "질문",
@@ -135,8 +192,11 @@ departure_date = st.sidebar.date_input("출발일")
 route_name = build_route_name(departure_airport, arrival_airport)
 
 
-with st.sidebar.expander("개발자용 분석 변수 설정", expanded=False):
-    st.caption("현재는 데이터분석 파트 결과값이 없으므로 임시 변수로 테스트합니다.")
+with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
+    st.caption(
+        "현재는 실제 데이터 연결 전 단계라 분석 변수를 직접 조정합니다. "
+        "향후 공공데이터 전처리 결과로 자동 계산됩니다."
+    )
 
     passenger_growth_rate = st.slider(
         "여객 수요 증가율(%)",
@@ -202,51 +262,79 @@ use_llm = st.sidebar.toggle(
 )
 
 if not LLM_AVAILABLE:
-    st.sidebar.caption("현재 src/llm_client.py 또는 OpenAI 패키지 설정이 없어 규칙 기반 리포트만 사용합니다.")
+    st.sidebar.caption("현재 OpenAI API 설정이 없어 규칙 기반 리포트만 사용합니다.")
 
 
 analyze_button = st.sidebar.button(
-    "분석 실행",
+    "구매 타이밍 분석하기",
     type="primary",
     use_container_width=True
 )
 
 
+# =========================
+# Default Main View
+# =========================
+
 if not analyze_button:
-    left_col, right_col = st.columns([1.2, 1])
+    st.subheader("항공권 구매 전, 이런 판단을 도와줍니다")
 
-    with left_col:
-        st.subheader("서비스 개요")
-        st.write(
-            """
-            이 서비스는 항공권 실제 가격을 직접 예측하는 대신,  
-            공공데이터 기반으로 가격 상승 가능성에 영향을 줄 수 있는 요인을 분석합니다.
-            """
-        )
+    col1, col2, col3 = st.columns(3)
 
+    with col1:
         st.markdown(
             """
-            **분석에 반영되는 주요 요인**
-            - 노선별 여객 수요 변화
-            - 운항편 공급 변화
-            - 공휴일 및 연휴 인접 여부
-            - 엔화 환율 변화
-            - 지연·결항 등 운항 리스크
-            - 출발일 변경 What-if 시뮬레이션
+            ### 1. 지금 사야 할지 판단
+
+            단순히 가격을 보여주는 것이 아니라,  
+            **지금 구매를 미루는 것이 위험한 상황인지** 판단합니다.
             """
         )
 
-    with right_col:
-        st.subheader("현재 MVP 범위")
-        st.info(
+    with col2:
+        st.markdown(
             """
-            현재 버전은 데이터분석 결과값을 임시 입력값으로 넣어  
-            Agent 기반 위험도 산정과 사용자용 리포트 생성을 테스트하는 단계입니다.
+            ### 2. 왜 그런지 설명
+
+            수요 증가, 운항편 부족, 연휴 인접, 환율 변화 등  
+            **구매 판단에 영향을 주는 이유**를 나눠서 보여줍니다.
             """
         )
 
-    st.warning("왼쪽 사이드바에서 조건을 입력한 뒤 `분석 실행` 버튼을 눌러주세요.")
+    with col3:
+        st.markdown(
+            """
+            ### 3. 날짜를 바꾸면 나아지는지 비교
 
+            기준 출발일, 3일 뒤, 7일 뒤를 비교해  
+            **일정을 조정하면 위험도가 낮아지는지** 확인합니다.
+            """
+        )
+
+    st.divider()
+
+    st.subheader("분석 결과는 이렇게 해석하면 됩니다")
+
+    st.markdown(
+        """
+        - **구매를 미루기 위험한 편**: 수요가 몰리거나 연휴가 가까워 가격이 불리해질 가능성이 큰 상태
+        - **며칠 더 확인 필요**: 일부 위험 요인이 있어 가격 변동을 지켜볼 필요가 있는 상태
+        - **비교적 여유 있음**: 현재 조건에서는 급하게 구매하지 않아도 되는 상태
+        """
+    )
+
+    st.info(
+        "왼쪽에서 여행 조건을 입력한 뒤 **구매 타이밍 분석하기** 버튼을 누르면 결과가 표시됩니다."
+    )
+
+    st.caption(
+        "현재 MVP는 실제 항공권 가격을 직접 예측하지 않고, 공공데이터 기반 요인을 바탕으로 가격 상승 위험도를 판단합니다."
+    )
+
+
+# =========================
+# Analysis Execution
+# =========================
 
 if analyze_button:
     try:
@@ -276,37 +364,61 @@ if analyze_button:
         risk = risk_result["risk_assessment"]
         factors = risk_result["factor_analysis"]
 
-        st.subheader("분석 결과 요약")
+        # =========================
+        # User-first Summary
+        # =========================
+
+        st.subheader("구매 타이밍 판단 결과")
 
         st.markdown(
             f"""
-            ### {route_name} 항공권 구매 타이밍 분석
+            ### {route_name} 항공권은 **{risk["recommendation"]}**가 필요합니다.
 
-            선택한 출발일은 **{departure_date}**이며,  
-            공공데이터 기반 가격 상승 위험도는 **{get_risk_badge(risk["risk_level"])}**입니다.
+            선택한 출발일은 **{departure_date}**입니다.  
+            현재 조건을 보면 **{get_risk_badge(risk["risk_level"])}** 상태입니다.
+            """
+        )
+
+        st.info(get_plain_recommendation(risk["recommendation"]))
+
+        show_risk_summary_message(risk)
+
+        st.markdown(
+            f"""
+            **왜 이렇게 판단했나요?**  
+            {get_top_factor_message(factors)}
+
+            **이 점수는 무엇을 의미하나요?**  
+            종합 점수는 **{risk["risk_score"]}/{risk["max_score"]}점**입니다.  
+            점수가 높을수록 항공권 구매를 오래 미루기 불리한 조건이 많다는 뜻입니다.
             """
         )
 
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("위험도 등급", risk["risk_level"])
+            st.metric("구매 판단", risk["recommendation"])
 
         with col2:
-            st.metric("위험도 점수", f'{risk["risk_score"]}/{risk["max_score"]}점')
+            st.metric("구매 지연 위험", risk["risk_level"])
 
         with col3:
-            st.metric("구매 판단", risk["recommendation"])
+            st.metric("종합 점수", f'{risk["risk_score"]}/{risk["max_score"]}점')
 
         with col4:
             st.metric("판단 신뢰도", risk["confidence"])
 
-        st.info(get_recommendation_message(risk["recommendation"]))
-        st.caption(risk["summary"])
+        with st.expander("위험도 표현 설명"):
+            st.write(get_risk_explanation(risk["risk_level"]))
 
         st.divider()
 
-        st.subheader("What-if 출발일 변경 시뮬레이션")
+
+        # =========================
+        # What-if Simulation
+        # =========================
+
+        st.subheader("날짜를 바꾸면 더 나아질까?")
 
         scenario_results = generate_date_shift_scenarios(
             sample_input,
@@ -315,11 +427,11 @@ if analyze_button:
 
         scenario_table = pd.DataFrame([
             {
-                "시나리오": item["scenario_name"],
+                "선택지": item["scenario_name"],
                 "출발일": item["departure_date"],
-                "위험도": item["risk_level"],
+                "구매 지연 위험": item["risk_level"],
                 "점수": f'{item["risk_score"]}/{item["max_score"]}',
-                "추천": item["recommendation"],
+                "판단": item["recommendation"],
                 "여객 증가율(%)": item["passenger_growth_rate"],
                 "연휴까지 남은 일수": item["days_to_holiday"]
             }
@@ -332,6 +444,16 @@ if analyze_button:
             hide_index=True
         )
 
+        best_scenario = min(
+            scenario_results,
+            key=lambda item: item["risk_score"]
+        )
+
+        st.success(
+            f"현재 입력값 기준으로는 **{best_scenario['scenario_name']}({best_scenario['departure_date']})**이 "
+            f"가장 낮은 위험도({best_scenario['risk_score']}/{best_scenario['max_score']}점)로 계산됩니다."
+        )
+
         st.caption(
             "현재 What-if는 실제 항공권 가격 예측이 아니라, 출발일 변경에 따른 연휴 인접도와 "
             "수요 집중 완화 가능성을 단순 가정하여 위험도 변화를 비교하는 기능입니다."
@@ -339,7 +461,14 @@ if analyze_button:
 
         st.divider()
 
-        st.subheader("요인별 위험도")
+
+        # =========================
+        # Factor Overview
+        # =========================
+
+        st.subheader("구매 판단에 영향을 준 요인")
+
+        st.caption("각 요인은 5점 만점이며, 점수가 높을수록 항공권 구매를 미루기 불리한 요인입니다.")
 
         factor_order = [
             ("demand", "수요"),
@@ -363,12 +492,17 @@ if analyze_button:
 
         st.divider()
 
-        st.subheader("Agent별 판단 근거")
+
+        # =========================
+        # Agent Detail
+        # =========================
+
+        st.subheader("요인별 상세 근거")
 
         for factor_key, factor_label in factor_order:
             factor = factors[factor_key]
 
-            with st.expander(f"{factor_label} Agent | {factor['status']} / {factor['score']}점"):
+            with st.expander(f"{factor_label} | {factor['status']} / {factor['score']}/{factor['max_score']}점"):
                 st.write(f"**근거**: {factor['evidence']}")
                 st.write(f"**해석**: {factor['business_interpretation']}")
                 st.write(f"**데이터 출처**: {factor['data_source']}")
@@ -377,7 +511,12 @@ if analyze_button:
 
         st.divider()
 
-        st.subheader("구매 타이밍 리포트")
+
+        # =========================
+        # Final Report
+        # =========================
+
+        st.subheader("상세 리포트")
 
         if use_llm and LLM_AVAILABLE:
             st.caption("생성 방식: LLM 기반 리포트")
@@ -387,6 +526,11 @@ if analyze_button:
         st.markdown(result_text)
 
         st.divider()
+
+
+        # =========================
+        # Debug Data
+        # =========================
 
         with st.expander("분석 결과 JSON 확인", expanded=False):
             st.json(risk_result)
