@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from src.agents import run_agent_pipeline
+from src.data_loader import load_sample_route_features, find_route_feature
 from src.response_generator import generate_user_response
 from src.scenario_simulator import generate_date_shift_scenarios
 
@@ -96,7 +97,28 @@ def build_route_name(departure_airport: str, arrival_airport: str) -> str:
     return f"{departure_name}-{arrival_name}"
 
 
-def build_sample_input(
+def build_input_from_feature(
+    original_text: str,
+    route_name: str,
+    feature: dict
+) -> dict:
+    return {
+        "original_text": original_text,
+        "departure_airport": feature["departure_airport"],
+        "arrival_airport": feature["arrival_airport"],
+        "route_name": route_name,
+        "departure_date": str(feature["departure_date"]),
+        "passenger_growth_rate": float(feature["passenger_growth_rate"]),
+        "flight_growth_rate": float(feature["flight_growth_rate"]),
+        "days_to_holiday": int(feature["days_to_holiday"]),
+        "holiday_name": str(feature["holiday_name"]),
+        "jpy_krw_change_rate": float(feature["jpy_krw_change_rate"]),
+        "delay_rate": float(feature["delay_rate"]),
+        "cancel_count": int(feature["cancel_count"]),
+    }
+
+
+def build_manual_input(
     original_text,
     departure_airport,
     arrival_airport,
@@ -135,6 +157,23 @@ def show_risk_summary_message(risk: dict) -> None:
         st.success(risk["summary"])
 
 
+@st.cache_data
+def get_sample_data() -> pd.DataFrame:
+    return load_sample_route_features()
+
+
+# =========================
+# Load Data
+# =========================
+
+try:
+    sample_df = get_sample_data()
+except Exception as data_error:
+    st.error("샘플 데이터를 불러오지 못했습니다.")
+    st.exception(data_error)
+    st.stop()
+
+
 # =========================
 # Header
 # =========================
@@ -165,7 +204,7 @@ original_text = st.sidebar.text_area(
 
 departure_airport = st.sidebar.selectbox(
     "출발 공항",
-    ["ICN", "GMP", "PUS", "CJU"],
+    sorted(sample_df["departure_airport"].unique().tolist()),
     format_func=lambda x: {
         "ICN": "인천(ICN)",
         "GMP": "김포(GMP)",
@@ -174,9 +213,15 @@ departure_airport = st.sidebar.selectbox(
     }.get(x, x)
 )
 
+available_arrivals = sorted(
+    sample_df[
+        sample_df["departure_airport"] == departure_airport
+    ]["arrival_airport"].unique().tolist()
+)
+
 arrival_airport = st.sidebar.selectbox(
     "도착 공항",
-    ["NRT", "HND", "KIX", "FUK", "CTS", "OKA"],
+    available_arrivals,
     format_func=lambda x: {
         "NRT": "도쿄 나리타(NRT)",
         "HND": "도쿄 하네다(HND)",
@@ -191,18 +236,50 @@ departure_date = st.sidebar.date_input("출발일")
 
 route_name = build_route_name(departure_airport, arrival_airport)
 
+matched_feature = find_route_feature(
+    df=sample_df,
+    departure_airport=departure_airport,
+    arrival_airport=arrival_airport,
+    departure_date=str(departure_date)
+)
 
-with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
+use_manual_mode = False
+
+if matched_feature:
+    st.sidebar.success("선택한 노선에 맞는 샘플 분석 데이터를 불러왔습니다.")
+else:
+    st.sidebar.warning("선택한 노선의 샘플 데이터가 없어 수동 입력값을 사용합니다.")
+    use_manual_mode = True
+
+
+with st.sidebar.expander("고급 설정: 분석 변수 직접 수정", expanded=False):
     st.caption(
-        "현재는 실제 데이터 연결 전 단계라 분석 변수를 직접 조정합니다. "
-        "향후 공공데이터 전처리 결과로 자동 계산됩니다."
+        "기본값은 샘플 데이터에서 자동 적용됩니다. "
+        "시연이나 테스트가 필요할 때만 직접 수정하세요."
     )
+
+    if matched_feature:
+        default_passenger_growth_rate = float(matched_feature["passenger_growth_rate"])
+        default_flight_growth_rate = float(matched_feature["flight_growth_rate"])
+        default_days_to_holiday = int(matched_feature["days_to_holiday"])
+        default_holiday_name = str(matched_feature["holiday_name"])
+        default_jpy_krw_change_rate = float(matched_feature["jpy_krw_change_rate"])
+        default_delay_rate = float(matched_feature["delay_rate"])
+        default_cancel_count = int(matched_feature["cancel_count"])
+    else:
+        default_passenger_growth_rate = 12.5
+        default_flight_growth_rate = 2.1
+        default_days_to_holiday = 2
+        default_holiday_name = "추석 연휴"
+        default_jpy_krw_change_rate = 3.4
+        default_delay_rate = 4.2
+        default_cancel_count = 0
 
     passenger_growth_rate = st.slider(
         "여객 수요 증가율(%)",
         min_value=-20.0,
         max_value=50.0,
-        value=12.5,
+        value=default_passenger_growth_rate,
         step=0.5
     )
 
@@ -210,7 +287,7 @@ with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
         "운항편 증가율(%)",
         min_value=-20.0,
         max_value=50.0,
-        value=2.1,
+        value=default_flight_growth_rate,
         step=0.5
     )
 
@@ -218,20 +295,20 @@ with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
         "공휴일/연휴까지 남은 일수",
         min_value=0,
         max_value=30,
-        value=2,
+        value=default_days_to_holiday,
         step=1
     )
 
     holiday_name = st.text_input(
         "공휴일/연휴명",
-        value="추석 연휴"
+        value=default_holiday_name
     )
 
     jpy_krw_change_rate = st.slider(
         "엔화 환율 변화율(%)",
         min_value=-20.0,
         max_value=30.0,
-        value=3.4,
+        value=default_jpy_krw_change_rate,
         step=0.1
     )
 
@@ -239,7 +316,7 @@ with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
         "운항 지연율(%)",
         min_value=0.0,
         max_value=50.0,
-        value=4.2,
+        value=default_delay_rate,
         step=0.1
     )
 
@@ -247,7 +324,7 @@ with st.sidebar.expander("분석용 임시 변수 설정", expanded=False):
         "결항 건수",
         min_value=0,
         max_value=100,
-        value=0,
+        value=default_cancel_count,
         step=1
     )
 
@@ -313,6 +390,38 @@ if not analyze_button:
 
     st.divider()
 
+    st.subheader("현재 선택한 조건")
+
+    selected_col1, selected_col2, selected_col3 = st.columns(3)
+
+    with selected_col1:
+        st.metric("출발 공항", departure_airport)
+
+    with selected_col2:
+        st.metric("도착 공항", arrival_airport)
+
+    with selected_col3:
+        st.metric("출발일", str(departure_date))
+
+    if matched_feature:
+        st.success(
+            f"현재 선택한 {route_name} 노선은 샘플 데이터가 연결되어 있어, "
+            "분석 변수가 자동으로 적용됩니다."
+        )
+
+        with st.expander("자동 적용된 분석 변수 확인"):
+            st.dataframe(
+                pd.DataFrame([matched_feature]),
+                use_container_width=True,
+                hide_index=True
+            )
+    else:
+        st.warning(
+            "현재 선택한 노선은 샘플 데이터가 없어 고급 설정의 기본값으로 분석됩니다."
+        )
+
+    st.divider()
+
     st.subheader("분석 결과는 이렇게 해석하면 됩니다")
 
     st.markdown(
@@ -338,20 +447,35 @@ if not analyze_button:
 
 if analyze_button:
     try:
-        sample_input = build_sample_input(
-            original_text=original_text,
-            departure_airport=departure_airport,
-            arrival_airport=arrival_airport,
-            route_name=route_name,
-            departure_date=departure_date,
-            passenger_growth_rate=passenger_growth_rate,
-            flight_growth_rate=flight_growth_rate,
-            days_to_holiday=days_to_holiday,
-            holiday_name=holiday_name,
-            jpy_krw_change_rate=jpy_krw_change_rate,
-            delay_rate=delay_rate,
-            cancel_count=cancel_count
-        )
+        if matched_feature and not use_manual_mode:
+            sample_input = build_input_from_feature(
+                original_text=original_text,
+                route_name=route_name,
+                feature=matched_feature
+            )
+
+            sample_input["passenger_growth_rate"] = passenger_growth_rate
+            sample_input["flight_growth_rate"] = flight_growth_rate
+            sample_input["days_to_holiday"] = days_to_holiday
+            sample_input["holiday_name"] = holiday_name
+            sample_input["jpy_krw_change_rate"] = jpy_krw_change_rate
+            sample_input["delay_rate"] = delay_rate
+            sample_input["cancel_count"] = cancel_count
+        else:
+            sample_input = build_manual_input(
+                original_text=original_text,
+                departure_airport=departure_airport,
+                arrival_airport=arrival_airport,
+                route_name=route_name,
+                departure_date=departure_date,
+                passenger_growth_rate=passenger_growth_rate,
+                flight_growth_rate=flight_growth_rate,
+                days_to_holiday=days_to_holiday,
+                holiday_name=holiday_name,
+                jpy_krw_change_rate=jpy_krw_change_rate,
+                delay_rate=delay_rate,
+                cancel_count=cancel_count
+            )
 
         risk_result = run_agent_pipeline(sample_input)
 
@@ -374,7 +498,7 @@ if analyze_button:
             f"""
             ### {route_name} 항공권은 **{risk["recommendation"]}**가 필요합니다.
 
-            선택한 출발일은 **{departure_date}**입니다.  
+            선택한 출발일은 **{sample_input["departure_date"]}**입니다.  
             현재 조건을 보면 **{get_risk_badge(risk["risk_level"])}** 상태입니다.
             """
         )
