@@ -2,17 +2,17 @@ import pandas as pd
 import streamlit as st
 
 from src.agents import run_agent_pipeline
+from src.analysis_logger import save_analysis_log
 from src.data_loader import load_sample_route_features, find_route_feature
+from src.fallback_report import build_fallback_report, format_report_markdown
+from src.llm_client import is_llm_available, generate_structured_llm_report
+from src.query_parser import parse_query_with_llm
 from src.response_generator import generate_user_response
 from src.route_comparator import compare_routes_by_destination, get_best_route
 from src.scenario_simulator import generate_date_shift_scenarios
 
-try:
-    from src.llm_client import generate_llm_report
-    LLM_AVAILABLE = True
-except Exception:
-    generate_llm_report = None
-    LLM_AVAILABLE = False
+
+LLM_AVAILABLE = is_llm_available()
 
 
 st.set_page_config(
@@ -21,10 +21,6 @@ st.set_page_config(
     layout="wide"
 )
 
-
-# =========================
-# Helper
-# =========================
 
 def get_risk_badge(risk_level: str) -> str:
     if risk_level == "높음":
@@ -163,10 +159,6 @@ def get_sample_data() -> pd.DataFrame:
     return load_sample_route_features()
 
 
-# =========================
-# Load Data
-# =========================
-
 try:
     sample_df = get_sample_data()
 except Exception as data_error:
@@ -174,10 +166,6 @@ except Exception as data_error:
     st.exception(data_error)
     st.stop()
 
-
-# =========================
-# Header
-# =========================
 
 st.title("항공권, 지금 사야 할까?")
 
@@ -189,19 +177,26 @@ st.caption(
 st.divider()
 
 
-# =========================
-# Sidebar
-# =========================
-
 st.sidebar.title("여행 조건 입력")
 
-st.sidebar.subheader("기본 여행 정보")
+st.sidebar.subheader("질문 입력")
 
 original_text = st.sidebar.text_area(
     "질문",
     value="9월 말에 인천에서 도쿄 가려고 하는데 지금 사는 게 나을까?",
     height=90
 )
+
+use_query_parser = st.sidebar.toggle(
+    "질문에서 여행 조건 자동 해석",
+    value=LLM_AVAILABLE,
+    disabled=not LLM_AVAILABLE
+)
+
+if not LLM_AVAILABLE:
+    st.sidebar.caption("OpenAI API Key가 설정되지 않아 질문 자동 해석과 LLM 리포트는 비활성화됩니다.")
+
+st.sidebar.subheader("직접 선택")
 
 departure_airport = st.sidebar.selectbox(
     "출발 공항",
@@ -244,19 +239,21 @@ matched_feature = find_route_feature(
     departure_date=str(departure_date)
 )
 
-use_manual_mode = False
-
 if matched_feature:
     st.sidebar.success("선택한 노선에 맞는 샘플 분석 데이터를 불러왔습니다.")
 else:
     st.sidebar.warning("선택한 노선의 샘플 데이터가 없어 수동 입력값을 사용합니다.")
-    use_manual_mode = True
 
 
 with st.sidebar.expander("고급 설정: 분석 변수 직접 수정", expanded=False):
     st.caption(
         "기본값은 샘플 데이터에서 자동 적용됩니다. "
-        "시연이나 테스트가 필요할 때만 직접 수정하세요."
+        "직접 수정 옵션을 켠 경우에만 아래 값이 분석에 반영됩니다."
+    )
+
+    manual_override_enabled = st.checkbox(
+        "고급 설정 값으로 분석 변수 덮어쓰기",
+        value=False
     )
 
     if matched_feature:
@@ -335,13 +332,9 @@ st.sidebar.subheader("리포트 생성 방식")
 
 use_llm = st.sidebar.toggle(
     "LLM 설명 생성 사용",
-    value=False,
+    value=LLM_AVAILABLE,
     disabled=not LLM_AVAILABLE
 )
-
-if not LLM_AVAILABLE:
-    st.sidebar.caption("현재 OpenAI API 설정이 없어 규칙 기반 리포트만 사용합니다.")
-
 
 analyze_button = st.sidebar.button(
     "구매 타이밍 분석하기",
@@ -349,10 +342,6 @@ analyze_button = st.sidebar.button(
     use_container_width=True
 )
 
-
-# =========================
-# Default Main View
-# =========================
 
 if not analyze_button:
     st.subheader("항공권 구매 전, 이런 판단을 도와줍니다")
@@ -372,10 +361,10 @@ if not analyze_button:
     with col2:
         st.markdown(
             """
-            ### 2. 왜 그런지 설명
+            ### 2. 질문을 자동 해석
 
-            수요 증가, 운항편 부족, 연휴 인접, 환율 변화 등  
-            **구매 판단에 영향을 주는 이유**를 나눠서 보여줍니다.
+            사용자가 입력한 문장에서  
+            **출발지, 목적지, 출발 시기**를 추출합니다.
             """
         )
 
@@ -442,33 +431,50 @@ if not analyze_button:
     )
 
 
-# =========================
-# Analysis Execution
-# =========================
-
 if analyze_button:
+    query_parse_result = None
+    llm_success = False
+    llm_error_message = None
+
     try:
-        if matched_feature and not use_manual_mode:
+        effective_departure_airport = departure_airport
+        effective_arrival_airport = arrival_airport
+        effective_departure_date = str(departure_date)
+
+        if use_query_parser and LLM_AVAILABLE:
+            with st.spinner("질문에서 여행 조건을 해석하는 중입니다..."):
+                query_parse_result = parse_query_with_llm(original_text)
+
+            if query_parse_result.get("parse_success"):
+                effective_departure_airport = query_parse_result["departure_airport"]
+                effective_arrival_airport = query_parse_result["arrival_airport"]
+                effective_departure_date = query_parse_result["departure_date"]
+
+        effective_route_name = build_route_name(
+            effective_departure_airport,
+            effective_arrival_airport
+        )
+
+        effective_feature = find_route_feature(
+            df=sample_df,
+            departure_airport=effective_departure_airport,
+            arrival_airport=effective_arrival_airport,
+            departure_date=effective_departure_date
+        )
+
+        if effective_feature:
             sample_input = build_input_from_feature(
                 original_text=original_text,
-                route_name=route_name,
-                feature=matched_feature
+                route_name=effective_route_name,
+                feature=effective_feature
             )
-
-            sample_input["passenger_growth_rate"] = passenger_growth_rate
-            sample_input["flight_growth_rate"] = flight_growth_rate
-            sample_input["days_to_holiday"] = days_to_holiday
-            sample_input["holiday_name"] = holiday_name
-            sample_input["jpy_krw_change_rate"] = jpy_krw_change_rate
-            sample_input["delay_rate"] = delay_rate
-            sample_input["cancel_count"] = cancel_count
         else:
             sample_input = build_manual_input(
                 original_text=original_text,
-                departure_airport=departure_airport,
-                arrival_airport=arrival_airport,
-                route_name=route_name,
-                departure_date=departure_date,
+                departure_airport=effective_departure_airport,
+                arrival_airport=effective_arrival_airport,
+                route_name=effective_route_name,
+                departure_date=effective_departure_date,
                 passenger_growth_rate=passenger_growth_rate,
                 flight_growth_rate=flight_growth_rate,
                 days_to_holiday=days_to_holiday,
@@ -478,26 +484,54 @@ if analyze_button:
                 cancel_count=cancel_count
             )
 
+        if manual_override_enabled:
+            sample_input["passenger_growth_rate"] = passenger_growth_rate
+            sample_input["flight_growth_rate"] = flight_growth_rate
+            sample_input["days_to_holiday"] = days_to_holiday
+            sample_input["holiday_name"] = holiday_name
+            sample_input["jpy_krw_change_rate"] = jpy_krw_change_rate
+            sample_input["delay_rate"] = delay_rate
+            sample_input["cancel_count"] = cancel_count
+
         risk_result = run_agent_pipeline(sample_input)
-
-        if use_llm and LLM_AVAILABLE:
-            with st.spinner("LLM이 구매 타이밍 리포트를 생성하는 중입니다..."):
-                result_text = generate_llm_report(risk_result)
-        else:
-            result_text = generate_user_response(risk_result)
-
         risk = risk_result["risk_assessment"]
         factors = risk_result["factor_analysis"]
 
-        # =========================
-        # User-first Summary
-        # =========================
+        if use_llm and LLM_AVAILABLE:
+            try:
+                with st.spinner("LLM이 사용자용 설명을 생성하는 중입니다..."):
+                    structured_report = generate_structured_llm_report(risk_result)
+                llm_success = True
+                result_text = format_report_markdown(structured_report)
+            except Exception as llm_error:
+                llm_success = False
+                llm_error_message = str(llm_error)
+                structured_report = build_fallback_report(
+                    risk_result=risk_result,
+                    error_message=llm_error_message
+                )
+                result_text = format_report_markdown(structured_report)
+        else:
+            structured_report = build_fallback_report(risk_result=risk_result)
+            result_text = generate_user_response(risk_result)
+
+        save_analysis_log(
+            risk_result=risk_result,
+            llm_used=use_llm,
+            llm_success=llm_success,
+            query_parse_result=query_parse_result,
+            error_message=llm_error_message
+        )
 
         st.subheader("구매 타이밍 판단 결과")
 
+        if query_parse_result:
+            with st.expander("질문 자동 해석 결과"):
+                st.json(query_parse_result)
+
         st.markdown(
             f"""
-            ### {route_name} 항공권은 **{risk["recommendation"]}**가 필요합니다.
+            ### {sample_input["route_name"]} 항공권은 **{risk["recommendation"]}**가 필요합니다.
 
             선택한 출발일은 **{sample_input["departure_date"]}**입니다.  
             현재 조건을 보면 **{get_risk_badge(risk["risk_level"])}** 상태입니다.
@@ -537,11 +571,6 @@ if analyze_button:
             st.write(get_risk_explanation(risk["risk_level"]))
 
         st.divider()
-
-
-        # =========================
-        # What-if Simulation
-        # =========================
 
         st.subheader("날짜를 바꾸면 더 나아질까?")
 
@@ -586,17 +615,12 @@ if analyze_button:
 
         st.divider()
 
-
-        # =========================
-        # Destination Comparison
-        # =========================
-
         st.subheader("같은 날짜에 다른 목적지는 어떨까?")
 
         route_comparison_results = compare_routes_by_destination(
             df=sample_df,
             original_text=original_text,
-            departure_airport=departure_airport,
+            departure_airport=sample_input["departure_airport"],
             departure_date=sample_input["departure_date"],
             route_name_builder=build_route_name
         )
@@ -638,11 +662,6 @@ if analyze_button:
 
         st.divider()
 
-
-        # =========================
-        # Factor Overview
-        # =========================
-
         st.subheader("구매 판단에 영향을 준 요인")
 
         st.caption("각 요인은 5점 만점이며, 점수가 높을수록 항공권 구매를 미루기 불리한 요인입니다.")
@@ -669,11 +688,6 @@ if analyze_button:
 
         st.divider()
 
-
-        # =========================
-        # Agent Detail
-        # =========================
-
         st.subheader("요인별 상세 근거")
 
         for factor_key, factor_label in factor_order:
@@ -688,26 +702,18 @@ if analyze_button:
 
         st.divider()
 
-
-        # =========================
-        # Final Report
-        # =========================
-
         st.subheader("상세 리포트")
 
-        if use_llm and LLM_AVAILABLE:
-            st.caption("생성 방식: LLM 기반 리포트")
+        if use_llm and llm_success:
+            st.caption("생성 방식: LLM 기반 구조화 리포트")
+        elif use_llm and not llm_success:
+            st.caption("생성 방식: LLM 실패 후 규칙 기반 fallback 리포트")
         else:
             st.caption("생성 방식: 규칙 기반 리포트")
 
         st.markdown(result_text)
 
         st.divider()
-
-
-        # =========================
-        # Debug Data
-        # =========================
 
         with st.expander("분석 결과 JSON 확인", expanded=False):
             st.json(risk_result)
