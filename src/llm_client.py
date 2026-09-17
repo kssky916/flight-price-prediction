@@ -3,12 +3,9 @@ import os
 from typing import Dict, Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 
 load_dotenv()
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def build_llm_input(risk_result: Dict[str, Any]) -> str:
@@ -25,6 +22,18 @@ def build_llm_input(risk_result: Dict[str, Any]) -> str:
 
 
 def generate_llm_report(risk_result: Dict[str, Any]) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY가 설정되지 않았습니다. "
+            ".env 파일에 OPENAI_API_KEY를 설정하거나, LLM 기능을 끄고 실행하세요."
+        )
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
     llm_input = build_llm_input(risk_result)
 
     system_prompt = """

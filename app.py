@@ -1,19 +1,17 @@
+import pandas as pd
 import streamlit as st
+
 from src.agents import run_agent_pipeline
 from src.response_generator import generate_user_response
+from src.scenario_simulator import generate_date_shift_scenarios
 
-# LLM 연결 파일이 아직 없어도 앱이 실행되도록 예외 처리
 try:
     from src.llm_client import generate_llm_report
     LLM_AVAILABLE = True
-except ImportError:
+except Exception:
     generate_llm_report = None
     LLM_AVAILABLE = False
 
-
-# =========================
-# Page Config
-# =========================
 
 st.set_page_config(
     page_title="항공권 구매 타이밍 의사결정 지원 서비스",
@@ -21,10 +19,6 @@ st.set_page_config(
     layout="wide"
 )
 
-
-# =========================
-# Helper Functions
-# =========================
 
 def get_risk_badge(risk_level: str) -> str:
     if risk_level == "높음":
@@ -82,9 +76,6 @@ def build_sample_input(
         "arrival_airport": arrival_airport,
         "route_name": route_name,
         "departure_date": str(departure_date),
-
-        # 현재는 개발자용 테스트 변수
-        # 추후 데이터분석 파트 결과값으로 교체
         "passenger_growth_rate": passenger_growth_rate,
         "flight_growth_rate": flight_growth_rate,
         "days_to_holiday": days_to_holiday,
@@ -95,10 +86,6 @@ def build_sample_input(
     }
 
 
-# =========================
-# Header
-# =========================
-
 st.title("LLM 기반 항공권 구매 타이밍 의사결정 지원 서비스")
 
 st.caption(
@@ -108,10 +95,6 @@ st.caption(
 
 st.divider()
 
-
-# =========================
-# Sidebar
-# =========================
 
 st.sidebar.title("분석 조건 입력")
 
@@ -151,10 +134,6 @@ departure_date = st.sidebar.date_input("출발일")
 
 route_name = build_route_name(departure_airport, arrival_airport)
 
-
-# =========================
-# Advanced Input
-# =========================
 
 with st.sidebar.expander("개발자용 분석 변수 설정", expanded=False):
     st.caption("현재는 데이터분석 파트 결과값이 없으므로 임시 변수로 테스트합니다.")
@@ -213,10 +192,6 @@ with st.sidebar.expander("개발자용 분석 변수 설정", expanded=False):
     )
 
 
-# =========================
-# LLM Option
-# =========================
-
 st.sidebar.divider()
 st.sidebar.subheader("리포트 생성 방식")
 
@@ -227,7 +202,7 @@ use_llm = st.sidebar.toggle(
 )
 
 if not LLM_AVAILABLE:
-    st.sidebar.caption("현재 src/llm_client.py가 없어 규칙 기반 리포트만 사용합니다.")
+    st.sidebar.caption("현재 src/llm_client.py 또는 OpenAI 패키지 설정이 없어 규칙 기반 리포트만 사용합니다.")
 
 
 analyze_button = st.sidebar.button(
@@ -236,10 +211,6 @@ analyze_button = st.sidebar.button(
     use_container_width=True
 )
 
-
-# =========================
-# Default Main View
-# =========================
 
 if not analyze_button:
     left_col, right_col = st.columns([1.2, 1])
@@ -261,6 +232,7 @@ if not analyze_button:
             - 공휴일 및 연휴 인접 여부
             - 엔화 환율 변화
             - 지연·결항 등 운항 리스크
+            - 출발일 변경 What-if 시뮬레이션
             """
         )
 
@@ -276,136 +248,152 @@ if not analyze_button:
     st.warning("왼쪽 사이드바에서 조건을 입력한 뒤 `분석 실행` 버튼을 눌러주세요.")
 
 
-# =========================
-# Analysis Execution
-# =========================
-
 if analyze_button:
-    sample_input = build_sample_input(
-        original_text=original_text,
-        departure_airport=departure_airport,
-        arrival_airport=arrival_airport,
-        route_name=route_name,
-        departure_date=departure_date,
-        passenger_growth_rate=passenger_growth_rate,
-        flight_growth_rate=flight_growth_rate,
-        days_to_holiday=days_to_holiday,
-        holiday_name=holiday_name,
-        jpy_krw_change_rate=jpy_krw_change_rate,
-        delay_rate=delay_rate,
-        cancel_count=cancel_count
-    )
+    try:
+        sample_input = build_sample_input(
+            original_text=original_text,
+            departure_airport=departure_airport,
+            arrival_airport=arrival_airport,
+            route_name=route_name,
+            departure_date=departure_date,
+            passenger_growth_rate=passenger_growth_rate,
+            flight_growth_rate=flight_growth_rate,
+            days_to_holiday=days_to_holiday,
+            holiday_name=holiday_name,
+            jpy_krw_change_rate=jpy_krw_change_rate,
+            delay_rate=delay_rate,
+            cancel_count=cancel_count
+        )
 
-    risk_result = run_agent_pipeline(sample_input)
+        risk_result = run_agent_pipeline(sample_input)
 
-    if use_llm and LLM_AVAILABLE:
-        with st.spinner("LLM이 구매 타이밍 리포트를 생성하는 중입니다..."):
-            result_text = generate_llm_report(risk_result)
-    else:
-        result_text = generate_user_response(risk_result)
+        if use_llm and LLM_AVAILABLE:
+            with st.spinner("LLM이 구매 타이밍 리포트를 생성하는 중입니다..."):
+                result_text = generate_llm_report(risk_result)
+        else:
+            result_text = generate_user_response(risk_result)
 
-    risk = risk_result["risk_assessment"]
-    factors = risk_result["factor_analysis"]
+        risk = risk_result["risk_assessment"]
+        factors = risk_result["factor_analysis"]
 
-    # =========================
-    # Summary Section
-    # =========================
+        st.subheader("분석 결과 요약")
 
-    st.subheader("분석 결과 요약")
+        st.markdown(
+            f"""
+            ### {route_name} 항공권 구매 타이밍 분석
 
-    st.markdown(
-        f"""
-        ### {route_name} 항공권 구매 타이밍 분석
+            선택한 출발일은 **{departure_date}**이며,  
+            공공데이터 기반 가격 상승 위험도는 **{get_risk_badge(risk["risk_level"])}**입니다.
+            """
+        )
 
-        선택한 출발일은 **{departure_date}**이며,  
-        공공데이터 기반 가격 상승 위험도는 **{get_risk_badge(risk["risk_level"])}**입니다.
-        """
-    )
+        col1, col2, col3, col4 = st.columns(4)
 
-    col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("위험도 등급", risk["risk_level"])
 
-    with col1:
-        st.metric("위험도 등급", risk["risk_level"])
+        with col2:
+            st.metric("위험도 점수", f'{risk["risk_score"]}/{risk["max_score"]}점')
 
-    with col2:
-        st.metric("위험도 점수", f'{risk["risk_score"]}점')
+        with col3:
+            st.metric("구매 판단", risk["recommendation"])
 
-    with col3:
-        st.metric("구매 판단", risk["recommendation"])
+        with col4:
+            st.metric("판단 신뢰도", risk["confidence"])
 
-    with col4:
-        st.metric("판단 신뢰도", risk["confidence"])
+        st.info(get_recommendation_message(risk["recommendation"]))
+        st.caption(risk["summary"])
 
-    st.info(get_recommendation_message(risk["recommendation"]))
-    st.caption(risk["summary"])
+        st.divider()
 
-    st.divider()
+        st.subheader("What-if 출발일 변경 시뮬레이션")
 
+        scenario_results = generate_date_shift_scenarios(
+            sample_input,
+            day_shifts=[0, 3, 7]
+        )
 
-    # =========================
-    # Factor Overview
-    # =========================
+        scenario_table = pd.DataFrame([
+            {
+                "시나리오": item["scenario_name"],
+                "출발일": item["departure_date"],
+                "위험도": item["risk_level"],
+                "점수": f'{item["risk_score"]}/{item["max_score"]}',
+                "추천": item["recommendation"],
+                "여객 증가율(%)": item["passenger_growth_rate"],
+                "연휴까지 남은 일수": item["days_to_holiday"]
+            }
+            for item in scenario_results
+        ])
 
-    st.subheader("요인별 위험도")
+        st.dataframe(
+            scenario_table,
+            use_container_width=True,
+            hide_index=True
+        )
 
-    factor_order = [
-        ("demand", "수요"),
-        ("supply", "공급"),
-        ("holiday", "연휴/시기"),
-        ("exchange_rate", "환율"),
-        ("operation", "운항 상황")
-    ]
+        st.caption(
+            "현재 What-if는 실제 항공권 가격 예측이 아니라, 출발일 변경에 따른 연휴 인접도와 "
+            "수요 집중 완화 가능성을 단순 가정하여 위험도 변화를 비교하는 기능입니다."
+        )
 
-    factor_cols = st.columns(5)
+        st.divider()
 
-    for col, (factor_key, factor_label) in zip(factor_cols, factor_order):
-        factor = factors[factor_key]
+        st.subheader("요인별 위험도")
 
-        with col:
-            st.markdown(f"**{factor_label}**")
-            st.metric(
-                label=factor["status"],
-                value=f'{factor["score"]}점'
-            )
+        factor_order = [
+            ("demand", "수요"),
+            ("supply", "공급"),
+            ("holiday", "연휴/시기"),
+            ("exchange_rate", "환율"),
+            ("operation", "운항 상황")
+        ]
 
-    st.divider()
+        factor_cols = st.columns(5)
 
+        for col, (factor_key, factor_label) in zip(factor_cols, factor_order):
+            factor = factors[factor_key]
 
-    # =========================
-    # Agent Detail
-    # =========================
+            with col:
+                st.markdown(f"**{factor_label}**")
+                st.metric(
+                    label=factor["status"],
+                    value=f'{factor["score"]}/{factor["max_score"]}점'
+                )
 
-    st.subheader("Agent별 판단 근거")
+        st.divider()
 
-    for factor_key, factor_label in factor_order:
-        factor = factors[factor_key]
+        st.subheader("Agent별 판단 근거")
 
-        with st.expander(f"{factor_label} Agent | {factor['status']} / {factor['score']}점"):
-            st.write(f"**근거**: {factor['evidence']}")
-            st.write(f"**해석**: {factor['business_interpretation']}")
+        for factor_key, factor_label in factor_order:
+            factor = factors[factor_key]
 
-    st.divider()
+            with st.expander(f"{factor_label} Agent | {factor['status']} / {factor['score']}점"):
+                st.write(f"**근거**: {factor['evidence']}")
+                st.write(f"**해석**: {factor['business_interpretation']}")
+                st.write(f"**데이터 출처**: {factor['data_source']}")
+                st.write(f"**사용 변수**: {', '.join(factor['used_features'])}")
+                st.write(f"**판단 기준**: {factor['threshold']}")
 
+        st.divider()
 
-    # =========================
-    # Final Report
-    # =========================
+        st.subheader("구매 타이밍 리포트")
 
-    st.subheader("구매 타이밍 리포트")
+        if use_llm and LLM_AVAILABLE:
+            st.caption("생성 방식: LLM 기반 리포트")
+        else:
+            st.caption("생성 방식: 규칙 기반 리포트")
 
-    if use_llm and LLM_AVAILABLE:
-        st.caption("생성 방식: LLM 기반 리포트")
-    else:
-        st.caption("생성 방식: 규칙 기반 리포트")
+        st.markdown(result_text)
 
-    st.markdown(result_text)
+        st.divider()
 
-    st.divider()
+        with st.expander("분석 결과 JSON 확인", expanded=False):
+            st.json(risk_result)
 
+        with st.expander("What-if 시뮬레이션 원본 결과 확인", expanded=False):
+            st.json(scenario_results)
 
-    # =========================
-    # Raw Data Debug
-    # =========================
-
-    with st.expander("분석 결과 JSON 확인", expanded=False):
-        st.json(risk_result)
+    except Exception as error:
+        st.error("분석 실행 중 오류가 발생했습니다.")
+        st.exception(error)
