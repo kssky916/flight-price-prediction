@@ -3,12 +3,20 @@ import os
 from typing import Dict, Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+DEFAULT_MODEL = "gpt-5-mini"
+
+
+def is_llm_available() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def get_openai_model() -> str:
+    return os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
 
 
 def build_llm_input(risk_result: Dict[str, Any]) -> str:
@@ -24,63 +32,163 @@ def build_llm_input(risk_result: Dict[str, Any]) -> str:
     )
 
 
-def generate_llm_report(risk_result: Dict[str, Any]) -> str:
+def validate_structured_report(report: Dict[str, Any]) -> None:
+    required_keys = [
+        "headline",
+        "one_line_summary",
+        "main_reasons",
+        "action_guide",
+        "alternative_suggestion",
+        "caution",
+        "display_level",
+    ]
+
+    missing_keys = [
+        key for key in required_keys
+        if key not in report
+    ]
+
+    if missing_keys:
+        raise ValueError(f"LLM 구조화 응답에 필수 키가 없습니다: {missing_keys}")
+
+    if not isinstance(report["main_reasons"], list):
+        raise ValueError("LLM 구조화 응답의 main_reasons는 list여야 합니다.")
+
+    if report["display_level"] not in ["높음", "보통", "낮음"]:
+        raise ValueError("LLM 구조화 응답의 display_level 값이 올바르지 않습니다.")
+
+
+def generate_structured_llm_report(risk_result: Dict[str, Any]) -> Dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다.")
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
     llm_input = build_llm_input(risk_result)
 
-    system_prompt = """
-너는 항공권 구매 타이밍 의사결정을 지원하는 AI 분석가다.
-너의 역할은 공공데이터 기반 위험도 분석 결과를 사용자가 이해하기 쉬운 설명으로 변환하는 것이다.
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "headline": {
+                "type": "string",
+                "description": "사용자가 바로 이해할 수 있는 한 줄 결론"
+            },
+            "one_line_summary": {
+                "type": "string",
+                "description": "노선, 출발일, 구매 판단을 포함한 요약"
+            },
+            "main_reasons": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 4,
+                "description": "판단 근거 목록"
+            },
+            "action_guide": {
+                "type": "string",
+                "description": "사용자가 다음에 무엇을 하면 되는지 안내"
+            },
+            "alternative_suggestion": {
+                "type": "string",
+                "description": "날짜 변경 또는 목적지 비교 등 대안 제안"
+            },
+            "caution": {
+                "type": "string",
+                "description": "가격 예측이 아니라 위험도 판단이라는 유의사항"
+            },
+            "display_level": {
+                "type": "string",
+                "enum": ["높음", "보통", "낮음"]
+            }
+        },
+        "required": [
+            "headline",
+            "one_line_summary",
+            "main_reasons",
+            "action_guide",
+            "alternative_suggestion",
+            "caution",
+            "display_level"
+        ]
+    }
 
-반드시 지켜야 할 원칙:
-- 실제 항공권 가격을 예측하지 않는다.
+    system_prompt = """
+너는 항공권 구매 타이밍 의사결정 지원 서비스의 사용자 설명 AI다.
+
+역할:
+- Agent가 계산한 위험도 결과를 사용자가 이해할 수 있는 설명으로 바꾼다.
+- 결론보다 근거와 행동 가이드를 명확히 전달한다.
+- 실제 가격, 예약률, 잔여 좌석 수를 추정하지 않는다.
+
+반드시 지킬 것:
+- 제공된 JSON 결과에 있는 정보만 사용한다.
 - 가격이 반드시 오른다고 단정하지 않는다.
-- 사용자의 구매를 강요하지 않는다.
-- 항공사 내부 예약률, 잔여 좌석 수, 실시간 가격 정보를 추정하지 않는다.
-- 제공된 분석 결과에 근거한 내용만 설명한다.
-- 최종 답변은 한국어 Markdown 형식으로 작성한다.
+- 구매를 강요하지 않는다.
+- '무조건', '반드시', '예약률', '잔여 좌석 부족', '예상 가격' 같은 표현을 사용하지 않는다.
+- 사용자가 다음 행동을 이해할 수 있게 쓴다.
+- 반드시 JSON Schema 형식으로만 답한다.
 """.strip()
 
     user_prompt = f"""
-아래 JSON은 항공권 가격 상승 위험도 분석 결과다.
+아래 JSON은 항공권 구매 타이밍 위험도 분석 결과다.
 
-[분석 결과 JSON]
+분석 결과:
 {llm_input}
 
-다음 형식으로 사용자용 리포트를 작성하라.
-
-# 항공권 구매 타이밍 분석 결과
-
-## 1. 위험도 요약
-- 노선, 출발일, 위험도 등급, 구매 판단을 요약한다.
-
-## 2. 주요 판단 근거
-- 수요, 공급, 연휴/시기, 환율, 운항 상황 요인을 구분해 설명한다.
-- 각 요인이 가격 상승 위험도에 어떤 영향을 줄 수 있는지 설명한다.
-
-## 3. 구매 타이밍 안내
-- 빠른 구매 검토, 가격 변동 지속 확인, 대기 가능 중 현재 판단을 설명한다.
-- 단정하지 말고 가능성 중심으로 표현한다.
-
-## 4. 일정 변경 시 고려할 점
-- 연휴 회피, 평일 출발, 대체 공항 또는 대체 날짜 검토 가능성을 제시한다.
-
-## 5. 유의사항
-- 실제 항공권 가격 데이터가 아닌 공공데이터 기반 위험도 분석이라는 점을 명시한다.
-
-금지 표현:
-- “무조건 지금 구매하세요”
-- “가격이 반드시 오릅니다”
-- “예상 가격은 OOO원입니다”
-- “잔여 좌석이 부족합니다”
-- “예약률이 높습니다”
+이 결과를 실제 웹서비스 화면에 표시할 수 있는 구조화된 사용자용 설명으로 작성하라.
 """.strip()
 
     response = client.responses.create(
-        model="gpt-5-mini",
+        model=get_openai_model(),
         input=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "flight_timing_report",
+                "schema": schema,
+                "strict": True,
+            }
+        },
     )
 
-    return response.output_text
+    if not response.output_text:
+        raise ValueError("LLM 응답이 비어 있습니다.")
+
+    report = json.loads(response.output_text)
+    validate_structured_report(report)
+
+    return report
+
+
+def generate_llm_report(risk_result: Dict[str, Any]) -> str:
+    structured_report = generate_structured_llm_report(risk_result)
+
+    reasons = "\n".join([
+        f"- {reason}" for reason in structured_report["main_reasons"]
+    ])
+
+    return f"""
+### {structured_report["headline"]}
+
+{structured_report["one_line_summary"]}
+
+#### 주요 판단 근거
+{reasons}
+
+#### 구매 판단 가이드
+{structured_report["action_guide"]}
+
+#### 대안 검토
+{structured_report["alternative_suggestion"]}
+
+#### 유의사항
+{structured_report["caution"]}
+""".strip()

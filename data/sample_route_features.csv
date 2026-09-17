@@ -1,0 +1,12 @@
+route,departure_airport,arrival_airport,departure_date,passenger_growth_rate,flight_growth_rate,days_to_holiday,holiday_name,jpy_krw_change_rate,delay_rate,cancel_count
+ICN-NRT,ICN,NRT,2026-09-25,12.5,2.1,2,추석 연휴,3.4,4.2,0
+ICN-NRT,ICN,NRT,2026-09-28,8.0,3.5,5,추석 연휴,3.4,3.8,0
+ICN-NRT,ICN,NRT,2026-10-02,4.5,4.0,9,추석 연휴,3.4,3.2,0
+ICN-HND,ICN,HND,2026-09-25,10.8,2.5,2,추석 연휴,3.4,5.1,0
+ICN-KIX,ICN,KIX,2026-09-25,7.2,4.8,2,추석 연휴,3.4,3.1,0
+ICN-FUK,ICN,FUK,2026-09-25,5.1,5.5,2,추석 연휴,3.4,2.7,0
+ICN-CTS,ICN,CTS,2026-09-25,14.2,1.8,2,추석 연휴,3.4,6.5,0
+ICN-OKA,ICN,OKA,2026-09-25,9.5,3.0,2,추석 연휴,3.4,4.9,0
+GMP-HND,GMP,HND,2026-09-25,6.8,3.2,2,추석 연휴,3.4,3.5,0
+PUS-FUK,PUS,FUK,2026-09-25,4.2,4.0,2,추석 연휴,3.4,2.4,0
+CJU-KIX,CJU,KIX,2026-09-25,3.5,3.8,2,추석 연휴,3.4,2.1,0
