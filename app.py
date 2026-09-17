@@ -4,6 +4,7 @@ import streamlit as st
 from src.agents import run_agent_pipeline
 from src.data_loader import load_sample_route_features, find_route_feature
 from src.response_generator import generate_user_response
+from src.route_comparator import compare_routes_by_destination, get_best_route
 from src.scenario_simulator import generate_date_shift_scenarios
 
 try:
@@ -381,10 +382,10 @@ if not analyze_button:
     with col3:
         st.markdown(
             """
-            ### 3. 날짜를 바꾸면 나아지는지 비교
+            ### 3. 다른 선택지와 비교
 
-            기준 출발일, 3일 뒤, 7일 뒤를 비교해  
-            **일정을 조정하면 위험도가 낮아지는지** 확인합니다.
+            날짜를 바꾸거나 목적지를 바꿨을 때  
+            **구매 위험도가 낮아지는지** 비교합니다.
             """
         )
 
@@ -587,6 +588,58 @@ if analyze_button:
 
 
         # =========================
+        # Destination Comparison
+        # =========================
+
+        st.subheader("같은 날짜에 다른 목적지는 어떨까?")
+
+        route_comparison_results = compare_routes_by_destination(
+            df=sample_df,
+            original_text=original_text,
+            departure_airport=departure_airport,
+            departure_date=sample_input["departure_date"],
+            route_name_builder=build_route_name
+        )
+
+        if route_comparison_results:
+            route_comparison_table = pd.DataFrame([
+                {
+                    "노선": item["route_name"],
+                    "출발일": item["departure_date"],
+                    "구매 지연 위험": item["risk_level"],
+                    "점수": f'{item["risk_score"]}/{item["max_score"]}',
+                    "판단": item["recommendation"],
+                    "여객 증가율(%)": item["passenger_growth_rate"],
+                    "운항편 증가율(%)": item["flight_growth_rate"],
+                    "연휴까지 남은 일수": item["days_to_holiday"]
+                }
+                for item in route_comparison_results
+            ])
+
+            st.dataframe(
+                route_comparison_table,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            best_route = get_best_route(route_comparison_results)
+
+            if best_route:
+                st.success(
+                    f"같은 출발일 기준으로는 **{best_route['route_name']}** 노선이 "
+                    f"가장 낮은 위험도({best_route['risk_score']}/{best_route['max_score']}점)로 계산됩니다."
+                )
+
+            st.caption(
+                "목적지 비교는 같은 출발공항과 출발일을 기준으로 샘플 데이터에 존재하는 노선만 비교합니다."
+            )
+        else:
+            st.warning("비교 가능한 다른 목적지 데이터가 없습니다.")
+
+        st.divider()
+
+
+        # =========================
         # Factor Overview
         # =========================
 
@@ -661,6 +714,9 @@ if analyze_button:
 
         with st.expander("What-if 시뮬레이션 원본 결과 확인", expanded=False):
             st.json(scenario_results)
+
+        with st.expander("목적지 비교 원본 결과 확인", expanded=False):
+            st.json(route_comparison_results)
 
     except Exception as error:
         st.error("분석 실행 중 오류가 발생했습니다.")
