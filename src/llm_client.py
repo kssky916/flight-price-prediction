@@ -1,194 +1,134 @@
-import json
 import os
+from pathlib import Path
 from typing import Dict, Any
 
+import requests
 from dotenv import load_dotenv
 
 
-load_dotenv()
+ROOT_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = ROOT_DIR / ".env"
 
-
-DEFAULT_MODEL = "gpt-5-mini"
+load_dotenv(dotenv_path=ENV_PATH)
 
 
 def is_llm_available() -> bool:
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
-def get_openai_model() -> str:
-    return os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+def build_llm_prompt(risk_result: Dict[str, Any]) -> str:
+    factor_details = risk_result.get("factor_details", [])
+    evidence = risk_result.get("evidence", [])
 
+    factor_lines = []
+    for item in factor_details:
+        factor_lines.append(
+            f"- {item.get('factor')}: {item.get('score')}/{item.get('max_score')}점, {item.get('reason')}"
+        )
 
-def build_llm_input(risk_result: Dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "user_query": risk_result["user_query"],
-            "risk_assessment": risk_result["risk_assessment"],
-            "factor_analysis": risk_result["factor_analysis"],
-            "limitations": risk_result["limitations"],
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def validate_structured_report(report: Dict[str, Any]) -> None:
-    required_keys = [
-        "headline",
-        "one_line_summary",
-        "main_reasons",
-        "action_guide",
-        "alternative_suggestion",
-        "caution",
-        "display_level",
-    ]
-
-    missing_keys = [
-        key for key in required_keys
-        if key not in report
-    ]
-
-    if missing_keys:
-        raise ValueError(f"LLM 구조화 응답에 필수 키가 없습니다: {missing_keys}")
-
-    if not isinstance(report["main_reasons"], list):
-        raise ValueError("LLM 구조화 응답의 main_reasons는 list여야 합니다.")
-
-    if report["display_level"] not in ["높음", "보통", "낮음"]:
-        raise ValueError("LLM 구조화 응답의 display_level 값이 올바르지 않습니다.")
-
-
-def generate_structured_llm_report(risk_result: Dict[str, Any]) -> Dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다.")
-
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key)
-
-    llm_input = build_llm_input(risk_result)
-
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "headline": {
-                "type": "string",
-                "description": "사용자가 바로 이해할 수 있는 한 줄 결론"
-            },
-            "one_line_summary": {
-                "type": "string",
-                "description": "노선, 출발일, 구매 판단을 포함한 요약"
-            },
-            "main_reasons": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1,
-                "maxItems": 4,
-                "description": "판단 근거 목록"
-            },
-            "action_guide": {
-                "type": "string",
-                "description": "사용자가 다음에 무엇을 하면 되는지 안내"
-            },
-            "alternative_suggestion": {
-                "type": "string",
-                "description": "날짜 변경 또는 목적지 비교 등 대안 제안"
-            },
-            "caution": {
-                "type": "string",
-                "description": "가격 예측이 아니라 위험도 판단이라는 유의사항"
-            },
-            "display_level": {
-                "type": "string",
-                "enum": ["높음", "보통", "낮음"]
-            }
-        },
-        "required": [
-            "headline",
-            "one_line_summary",
-            "main_reasons",
-            "action_guide",
-            "alternative_suggestion",
-            "caution",
-            "display_level"
-        ]
-    }
-
-    system_prompt = """
-너는 항공권 구매 타이밍 의사결정 지원 서비스의 사용자 설명 AI다.
-
-역할:
-- Agent가 계산한 위험도 결과를 사용자가 이해할 수 있는 설명으로 바꾼다.
-- 결론보다 근거와 행동 가이드를 명확히 전달한다.
-- 실제 가격, 예약률, 잔여 좌석 수를 추정하지 않는다.
-
-반드시 지킬 것:
-- 제공된 JSON 결과에 있는 정보만 사용한다.
-- 가격이 반드시 오른다고 단정하지 않는다.
-- 구매를 강요하지 않는다.
-- '무조건', '반드시', '예약률', '잔여 좌석 부족', '예상 가격' 같은 표현을 사용하지 않는다.
-- 사용자가 다음 행동을 이해할 수 있게 쓴다.
-- 반드시 JSON Schema 형식으로만 답한다.
-""".strip()
-
-    user_prompt = f"""
-아래 JSON은 항공권 구매 타이밍 위험도 분석 결과다.
-
-분석 결과:
-{llm_input}
-
-이 결과를 실제 웹서비스 화면에 표시할 수 있는 구조화된 사용자용 설명으로 작성하라.
-""".strip()
-
-    response = client.responses.create(
-        model=get_openai_model(),
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "flight_timing_report",
-                "schema": schema,
-                "strict": True,
-            }
-        },
-    )
-
-    if not response.output_text:
-        raise ValueError("LLM 응답이 비어 있습니다.")
-
-    report = json.loads(response.output_text)
-    validate_structured_report(report)
-
-    return report
-
-
-def generate_llm_report(risk_result: Dict[str, Any]) -> str:
-    structured_report = generate_structured_llm_report(risk_result)
-
-    reasons = "\n".join([
-        f"- {reason}" for reason in structured_report["main_reasons"]
-    ])
+    evidence_lines = []
+    for item in evidence[:10]:
+        evidence_lines.append(f"- {item}")
 
     return f"""
-### {structured_report["headline"]}
+너는 항공권 구매 타이밍 판단 서비스의 설명 생성 담당자다.
 
-{structured_report["one_line_summary"]}
+아래 분석 결과를 사용자가 이해하기 쉽게 설명해라.
 
-#### 주요 판단 근거
-{reasons}
+반드시 지켜야 할 규칙:
+- 실제 항공권 가격을 예측했다고 말하지 마라.
+- LLM이 직접 판단했다고 말하지 마라.
+- 데이터 기반 점수화 로직의 결과를 설명하는 역할로만 작성해라.
+- 과장하지 마라.
+- 한국어로 작성해라.
+- 짧고 명확하게 작성해라.
 
-#### 구매 판단 가이드
-{structured_report["action_guide"]}
+[분석 결과]
+노선: {risk_result.get("departure_airport")} → {risk_result.get("arrival_airport")}
+출발일: {risk_result.get("departure_date")}
+위험도: {risk_result.get("risk_level")}
+위험도 점수: {risk_result.get("risk_score")} / {risk_result.get("max_score")}
+구매 판단: {risk_result.get("purchase_timing_recommendation")}
+판단 요약: {risk_result.get("decision_reason")}
 
-#### 대안 검토
-{structured_report["alternative_suggestion"]}
+[요인별 점수]
+{chr(10).join(factor_lines)}
 
-#### 유의사항
-{structured_report["caution"]}
+[사용 데이터]
+{chr(10).join(evidence_lines)}
+
+아래 형식으로만 작성해라.
+
+### LLM 기반 구매 타이밍 설명
+
+#### 1. 현재 판단
+- 현재 구매 판단을 한 문장으로 설명
+
+#### 2. 주요 근거
+- 핵심 근거 3개를 bullet로 설명
+
+#### 3. 해석
+- 왜 이런 판단이 나왔는지 2~3문장으로 설명
+
+#### 4. 최종 판단
+- 지금 구매, 모니터링, 대기 중 하나로 명확하게 설명
 """.strip()
+
+
+def _extract_text_from_response(data: Dict[str, Any]) -> str:
+    if "output_text" in data and data["output_text"]:
+        return data["output_text"]
+
+    output = data.get("output", [])
+
+    texts = []
+
+    for item in output:
+        content = item.get("content", [])
+
+        for content_item in content:
+            if content_item.get("type") in ["output_text", "text"]:
+                text = content_item.get("text", "")
+                if text:
+                    texts.append(text)
+
+    if texts:
+        return "\n".join(texts)
+
+    raise ValueError(f"LLM 응답에서 텍스트를 찾지 못했습니다: {data}")
+
+
+def generate_llm_explanation(risk_result: Dict[str, Any]) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
+
+    prompt = build_llm_prompt(risk_result)
+
+    url = "https://api.openai.com/v1/responses"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model,
+        "input": prompt,
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+
+    if response.status_code >= 400:
+        raise ValueError(f"OpenAI API 오류 {response.status_code}: {response.text}")
+
+    data = response.json()
+
+    return _extract_text_from_response(data)

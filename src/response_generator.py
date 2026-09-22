@@ -1,65 +1,92 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
+
+from src.llm_client import is_llm_available, generate_llm_explanation
 
 
-def _format_factor_reasons(risk_result: Dict[str, Any]) -> str:
-    factors = risk_result["factor_analysis"]
+def _get_value(data: Dict[str, Any], key: str, default=""):
+    value = data.get(key, default)
+    if value is None:
+        return default
+    return value
 
-    sorted_factors = sorted(
-        factors.values(),
-        key=lambda factor: factor["score"],
-        reverse=True
-    )
+
+def build_rule_based_explanation(risk_result: Dict[str, Any]) -> str:
+    risk_level = _get_value(risk_result, "risk_level")
+    recommendation = _get_value(risk_result, "purchase_timing_recommendation")
+    risk_score = _get_value(risk_result, "risk_score")
+    max_score = _get_value(risk_result, "max_score", 100)
+    decision_reason = _get_value(risk_result, "decision_reason")
+
+    factor_details: List[Dict[str, Any]] = risk_result.get("factor_details", [])
+    evidence: List[str] = risk_result.get("evidence", [])
 
     lines = []
+    lines.append("### 데이터 기반 구매 타이밍 설명")
+    lines.append("")
+    lines.append("#### 1. 현재 판단")
+    lines.append(f"- 현재 가격 상승 위험도는 **{risk_level}**이며, 구매 판단은 **{recommendation}**입니다.")
+    lines.append("")
+    lines.append("#### 2. 주요 근거")
 
-    for factor in sorted_factors:
-        if factor["score"] >= 3:
-            lines.append(
-                f"- **{factor['factor_name']}**: {factor['business_interpretation']}"
-            )
+    if factor_details:
+        sorted_factors = sorted(
+            factor_details,
+            key=lambda item: item.get("score", 0),
+            reverse=True,
+        )
 
-    if not lines:
-        lines.append("- 현재 조건에서는 강한 가격 상승 위험 요인이 크게 확인되지 않았습니다.")
+        for item in sorted_factors[:3]:
+            reason = item.get("reason", "")
+            score = item.get("score", "")
+            max_score_item = item.get("max_score", "")
+            lines.append(f"- {reason} ({score}/{max_score_item}점)")
+    else:
+        lines.append(f"- {decision_reason}")
+
+    lines.append("")
+    lines.append("#### 3. 해석")
+    lines.append(f"- 위험도 점수는 **{risk_score}/{max_score}점**입니다.")
+    lines.append(f"- {decision_reason}")
+    lines.append("")
+    lines.append("#### 4. 사용 데이터")
+
+    for item in evidence[:8]:
+        lines.append(f"- {item}")
+
+    lines.append("")
+    lines.append("#### 5. 최종 판단")
+    lines.append(f"- 현재 조건에서는 **{recommendation}**이 적절합니다.")
 
     return "\n".join(lines)
 
 
-def generate_user_response(risk_result: Dict[str, Any]) -> str:
-    user_query = risk_result["user_query"]
-    risk = risk_result["risk_assessment"]
+def generate_purchase_timing_report(risk_result: Dict[str, Any]) -> str:
+    if is_llm_available():
+        try:
+            return generate_llm_explanation(risk_result)
+        except Exception as e:
+            fallback = build_rule_based_explanation(risk_result)
+            return (
+                "### LLM 설명 생성 실패\n\n"
+                f"- 오류: `{str(e)}`\n"
+                "- 아래는 데이터 기반 기본 설명입니다.\n\n"
+                f"{fallback}"
+            )
 
-    route_name = user_query["route_name"]
-    departure_date = user_query["departure_date"]
+    return build_rule_based_explanation(risk_result)
 
-    if risk["risk_level"] == "높음":
-        headline = "구매를 오래 미루기에는 위험 요인이 많은 조건입니다."
-        action = "일정이 고정되어 있다면 현재 가격을 확인하고 빠른 구매를 검토하는 것이 좋습니다."
-    elif risk["risk_level"] == "보통":
-        headline = "며칠 더 가격 변동을 확인해볼 수 있는 조건입니다."
-        action = "바로 구매를 확정하기보다는 며칠간 가격 변동을 확인하면서 판단하는 것이 적절합니다."
-    else:
-        headline = "현재 조건에서는 비교적 여유가 있는 편입니다."
-        action = "일정에 여유가 있다면 다른 날짜나 목적지와 비교한 뒤 구매를 결정할 수 있습니다."
 
-    factor_reasons = _format_factor_reasons(risk_result)
+def generate_report(risk_result: Dict[str, Any]) -> str:
+    return generate_purchase_timing_report(risk_result)
 
-    return f"""
-### {headline}
 
-**{route_name} {departure_date} 출발 항공권**은 현재 기준으로 **{risk["recommendation"]}**가 필요한 상황입니다.
+def generate_llm_report(risk_result: Dict[str, Any]) -> str:
+    return generate_purchase_timing_report(risk_result)
 
-#### 주요 판단 근거
-{factor_reasons}
 
-#### 종합 판단
-- 구매 지연 위험: **{risk["risk_level"]}**
-- 종합 점수: **{risk["risk_score"]}/{risk["max_score"]}점**
-- 판단 신뢰도: **{risk["confidence"]}**
+def generate_fallback_report(risk_result: Dict[str, Any]) -> str:
+    return build_rule_based_explanation(risk_result)
 
-#### 다음 행동 가이드
-{action}
 
-#### 유의사항
-이 결과는 실제 항공권 판매 가격, 잔여 좌석 수, 예약률을 예측한 것이 아닙니다.  
-공공데이터 기반 수요·공급·연휴·환율·운항 요인을 활용한 **구매 지연 위험도 판단 결과**입니다.
-""".strip()
+def build_report(risk_result: Dict[str, Any]) -> str:
+    return generate_purchase_timing_report(risk_result)
