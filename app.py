@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import timedelta
+import time
 
 import streamlit as st
 import pandas as pd
@@ -11,6 +12,8 @@ from src.data_loader import (
 )
 from src.agents import run_agent_pipeline
 from src.response_generator import generate_purchase_timing_report
+from src.llm_client import parse_travel_request
+from src.travel_recommender import recommend_routes_from_request, complete_parsed_request
 
 
 st.set_page_config(
@@ -105,6 +108,34 @@ def display_airport(value):
     return name_map.get(value, value)
 
 
+def inject_global_style():
+    st.markdown(
+        """
+        <style>
+        .result-fade-in {
+            animation: result-fade-in 0.55s ease-out;
+        }
+
+        @keyframes result-fade-in {
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        div[data-testid="stTextArea"] textarea {
+            min-height: 150px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_metric_card(title, value, caption=""):
     st.markdown(
         f"""
@@ -117,7 +148,7 @@ def render_metric_card(title, value, caption=""):
             min-height: 126px;
         ">
             <div style="font-size: 14px; color: #6B7280; margin-bottom: 10px;">{title}</div>
-            <div style="font-size: 30px; font-weight: 700; color: #111827;">{value}</div>
+            <div style="font-size: 28px; font-weight: 700; color: #111827; word-break: keep-all;">{value}</div>
             <div style="font-size: 13px; color: #6B7280; margin-top: 10px;">{caption}</div>
         </div>
         """,
@@ -171,6 +202,133 @@ def scroll_to_analysis_top():
         """,
         height=0,
     )
+
+
+def render_loading_overlay(stage_text):
+    return f"""
+    <style>
+    .loading-overlay {{
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        background: rgba(248, 250, 252, 0.58);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }}
+
+    .loading-card {{
+        width: 420px;
+        padding: 38px 34px;
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid rgba(229, 231, 235, 0.95);
+        box-shadow: 0 28px 80px rgba(15, 23, 42, 0.18);
+        text-align: center;
+        animation: loading-card-in 0.35s ease-out;
+    }}
+
+    .plane-wrap {{
+        width: 82px;
+        height: 82px;
+        margin: 0 auto 20px auto;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #EEF2FF 0%, #DBEAFE 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        animation: plane-float 1.8s ease-in-out infinite;
+    }}
+
+    .plane-svg {{
+        width: 46px;
+        height: 46px;
+    }}
+
+    .loading-title {{
+        font-size: 26px;
+        font-weight: 850;
+        color: #111827;
+        margin-bottom: 10px;
+    }}
+
+    .loading-stage {{
+        font-size: 16px;
+        color: #374151;
+        line-height: 1.65;
+        margin-bottom: 24px;
+    }}
+
+    .progress-track {{
+        width: 100%;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: #E5E7EB;
+        margin-bottom: 14px;
+    }}
+
+    .progress-bar {{
+        width: 48%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #2563EB, #60A5FA);
+        animation: progress-move 1.35s ease-in-out infinite;
+    }}
+
+    .loading-sub {{
+        font-size: 13px;
+        color: #6B7280;
+    }}
+
+    @keyframes plane-float {{
+        0% {{ transform: translateY(0px) rotate(-8deg); }}
+        50% {{ transform: translateY(-9px) rotate(2deg); }}
+        100% {{ transform: translateY(0px) rotate(-8deg); }}
+    }}
+
+    @keyframes progress-move {{
+        0% {{ transform: translateX(-80%); }}
+        50% {{ transform: translateX(70%); }}
+        100% {{ transform: translateX(220%); }}
+    }}
+
+    @keyframes loading-card-in {{
+        from {{
+            opacity: 0;
+            transform: translateY(14px) scale(0.98);
+        }}
+        to {{
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }}
+    }}
+    </style>
+
+    <div class="loading-overlay">
+        <div class="loading-card">
+            <div class="plane-wrap">
+                <svg class="plane-svg" viewBox="0 0 24 24" fill="none">
+                    <path d="M2.5 13.5L21 3.5L15.5 21L11.5 14.5L2.5 13.5Z"
+                          fill="#2563EB"/>
+                    <path d="M11.5 14.5L21 3.5L8.5 12.8"
+                          stroke="white"
+                          stroke-width="1.6"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"/>
+                </svg>
+            </div>
+            <div class="loading-title">분석 중입니다</div>
+            <div class="loading-stage">{stage_text}</div>
+            <div class="progress-track">
+                <div class="progress-bar"></div>
+            </div>
+            <div class="loading-sub">잠시만 기다려주세요.</div>
+        </div>
+    </div>
+    """
 
 
 def load_recommendation_dates(limit=5):
@@ -282,10 +440,228 @@ def render_buy_now_recommendations(df):
         ]
     ]
 
-    st.table(recommendation_df)
+    st.dataframe(
+        recommendation_df,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
-def render_analysis_result(risk_result, matched_feature, arrival_date):
+def build_manual_sample_input(matched_feature, departure_airport, arrival_airport, departure_date):
+    return {
+        **matched_feature,
+        "departure_airport": matched_feature.get("departure_airport", departure_airport),
+        "arrival_airport": matched_feature.get("arrival_airport", arrival_airport),
+        "departure_date": str(departure_date),
+        "passenger_growth_rate": matched_feature.get("passenger_growth_rate", 0),
+        "flight_growth_rate": matched_feature.get("flight_growth_rate", 0),
+        "days_to_holiday": matched_feature.get("days_to_holiday", 0),
+        "holiday_name": matched_feature.get("holiday_name", ""),
+        "holiday_count": matched_feature.get("holiday_count", 0),
+        "jpy_krw_change_rate": matched_feature.get("jpy_krw_change_rate", 0),
+        "delay_rate": matched_feature.get("delay_rate", 0),
+        "cancel_count": matched_feature.get("cancel_count", 0),
+        "avg_carrier_count": matched_feature.get("avg_carrier_count", 0),
+        "avg_lcc_share": matched_feature.get("avg_lcc_share", 0),
+    }
+
+
+def render_parsed_request(parsed_request):
+    cards = []
+
+    travel_start = parsed_request.get("travel_window_start")
+    travel_end = parsed_request.get("travel_window_end")
+
+    if travel_start and travel_end:
+        cards.append(
+            {
+                "title": "여행 가능 기간",
+                "value": f"{travel_start} ~ {travel_end}",
+                "caption": "입력한 기간 조건",
+            }
+        )
+
+    nights = parsed_request.get("nights")
+    days = parsed_request.get("days")
+
+    if nights and days:
+        cards.append(
+            {
+                "title": "희망 체류 기간",
+                "value": f"{nights}박 {days}일",
+                "caption": "입력한 체류 조건",
+            }
+        )
+
+    destination_text = parsed_request.get("destination_city") or parsed_request.get("destination_country")
+
+    if destination_text:
+        cards.append(
+            {
+                "title": "목적지 조건",
+                "value": destination_text,
+                "caption": "입력한 목적지 조건",
+            }
+        )
+
+    holiday_names = parsed_request.get("must_include_holiday_names") or []
+
+    if holiday_names:
+        cards.append(
+            {
+                "title": "포함 조건",
+                "value": ", ".join(holiday_names),
+                "caption": "입력한 공휴일·이벤트 조건",
+            }
+        )
+
+    if not cards:
+        return
+
+    st.markdown("### AI가 추출한 여행 조건")
+
+    cols = st.columns(len(cards))
+
+    for col, card in zip(cols, cards):
+        with col:
+            render_metric_card(
+                card["title"],
+                card["value"],
+                card["caption"],
+            )
+
+
+def render_natural_recommendations(parsed_request, recommendations, top_ai_report):
+    scroll_to_analysis_top()
+
+    st.markdown('<div id="analysis-result-top"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    st.markdown(
+        """
+        <div class="result-fade-in">
+            <div style="
+                border-radius: 22px;
+                padding: 34px;
+                background: linear-gradient(135deg, #F8FAFC 0%, #EEF2FF 100%);
+                border: 1px solid #E5E7EB;
+                margin-bottom: 28px;
+            ">
+                <div style="font-size: 15px; color: #6B7280; margin-bottom: 10px;">
+                    텍스트 기반 추천 완료
+                </div>
+                <div style="font-size: 34px; font-weight: 800; color: #111827; margin-bottom: 12px;">
+                    입력한 여행 조건에 맞는 구매 검토 노선을 추천합니다
+                </div>
+                <div style="font-size: 18px; color: #374151; line-height: 1.55;">
+                    AI가 사용자의 문장에서 필요한 여행 조건을 추출하고,
+                    기존 위험도 산정 로직으로 후보 노선을 비교했습니다.
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    render_parsed_request(parsed_request)
+
+    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+
+    rows = []
+
+    for idx, item in enumerate(recommendations, start=1):
+        rows.append(
+            {
+                "순위": idx,
+                "추천 노선": f"{display_airport(item['departure_airport'])} → {display_airport(item['arrival_airport'])}",
+                "추천 일정": f"{item['departure_date']} ~ {item['return_date']}",
+                "위험도": f"{item['risk_level']} · {item['risk_score']}점",
+                "구매 판단": item["purchase_timing_recommendation"],
+            }
+        )
+
+    recommendation_df = pd.DataFrame(rows)
+
+    st.markdown("### 추천 결과")
+    st.caption("동일 노선이 반복되지 않도록 노선 다양성을 반영했습니다.")
+    st.dataframe(
+        recommendation_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    top_item = recommendations[0]
+    top_color = get_risk_color(top_item["risk_level"])
+
+    st.markdown(
+        f"""
+        <div style="
+            border-radius: 18px;
+            padding: 28px;
+            background-color: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            margin-top: 28px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        ">
+            <div style="font-size: 15px; color: #6B7280; margin-bottom: 8px;">
+                1순위 추천
+            </div>
+            <div style="font-size: 30px; font-weight: 800; color: #111827; margin-bottom: 10px;">
+                {display_airport(top_item["departure_airport"])} → {display_airport(top_item["arrival_airport"])}
+            </div>
+            <div style="font-size: 18px; color: #374151; margin-bottom: 8px;">
+                추천 일정: {top_item["departure_date"]} ~ {top_item["return_date"]}
+            </div>
+            <div style="font-size: 18px; color: #374151; margin-bottom: 18px;">
+                위험도: <span style="font-weight: 800; color: {top_color};">{top_item["risk_level"]}</span>
+                · {top_item["risk_score"]}점
+            </div>
+            <div style="font-size: 26px; font-weight: 800; color: {top_color};">
+                {top_item["purchase_timing_recommendation"]}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("1순위 추천에 대한 AI 2차 검토 보기", expanded=False):
+        if top_ai_report:
+            st.markdown(top_ai_report)
+        else:
+            st.warning("AI 2차 검토 결과가 비어 있습니다.")
+
+        st.markdown("### 1순위 추천 사용 피처")
+
+        matched_feature = top_item.get("matched_feature", {})
+
+        feature_cols = [
+            "year",
+            "route",
+            "departure_airport",
+            "arrival_airport",
+            "passenger_growth_rate",
+            "flight_growth_rate",
+            "passengers_per_flight",
+            "avg_carrier_count",
+            "avg_lcc_share",
+            "jpy_krw_rate",
+            "jpy_krw_change_rate",
+            "holiday_count",
+            "risk_score",
+            "risk_level",
+            "purchase_timing_recommendation",
+        ]
+
+        feature_cols = [col for col in feature_cols if col in matched_feature]
+
+        feature_df = pd.DataFrame(
+            [{"항목": col, "값": matched_feature.get(col)} for col in feature_cols]
+        )
+
+        st.dataframe(feature_df, use_container_width=True, hide_index=True)
+
+
+def render_analysis_result(risk_result, matched_feature, arrival_date, ai_report):
     scroll_to_analysis_top()
 
     st.markdown('<div id="analysis-result-top"></div>', unsafe_allow_html=True)
@@ -301,40 +677,42 @@ def render_analysis_result(risk_result, matched_feature, arrival_date):
 
     st.markdown(
         f"""
-        <div style="
-            border-radius: 22px;
-            padding: 34px;
-            background: linear-gradient(135deg, #F8FAFC 0%, #EEF2FF 100%);
-            border: 1px solid #E5E7EB;
-            margin-bottom: 28px;
-        ">
-            <div style="font-size: 15px; color: #6B7280; margin-bottom: 10px;">
-                분석 완료
-            </div>
-            <div style="font-size: 34px; font-weight: 800; color: #111827; margin-bottom: 12px;">
-                {departure_display} → {arrival_display} 노선 분석 결과
-            </div>
-            <div style="font-size: 18px; color: #374151; margin-bottom: 8px;">
-                여행 일정: {risk_result["departure_date"]} ~ {arrival_date}
-            </div>
-            <div style="font-size: 18px; color: #374151; margin-bottom: 22px;">
-                가격 상승 위험도는 
-                <span style="font-weight: 800; color: {risk_color};">{risk_level}</span>입니다.
-            </div>
+        <div class="result-fade-in">
             <div style="
-                border-radius: 16px;
-                background-color: #FFFFFF;
-                padding: 26px;
+                border-radius: 22px;
+                padding: 34px;
+                background: linear-gradient(135deg, #F8FAFC 0%, #EEF2FF 100%);
                 border: 1px solid #E5E7EB;
+                margin-bottom: 28px;
             ">
-                <div style="font-size: 15px; color: #6B7280; margin-bottom: 8px;">
-                    구매 판단
+                <div style="font-size: 15px; color: #6B7280; margin-bottom: 10px;">
+                    분석 완료
                 </div>
-                <div style="font-size: 34px; font-weight: 800; color: {risk_color}; margin-bottom: 8px;">
-                    {risk_result["purchase_timing_recommendation"]}
+                <div style="font-size: 34px; font-weight: 800; color: #111827; margin-bottom: 12px;">
+                    {departure_display} → {arrival_display} 노선 분석 결과
                 </div>
-                <div style="font-size: 18px; color: #111827; line-height: 1.55;">
-                    {decision_message}
+                <div style="font-size: 18px; color: #374151; margin-bottom: 8px;">
+                    여행 일정: {risk_result["departure_date"]} ~ {arrival_date}
+                </div>
+                <div style="font-size: 18px; color: #374151; margin-bottom: 22px;">
+                    가격 상승 위험도는 
+                    <span style="font-weight: 800; color: {risk_color};">{risk_level}</span>입니다.
+                </div>
+                <div style="
+                    border-radius: 16px;
+                    background-color: #FFFFFF;
+                    padding: 26px;
+                    border: 1px solid #E5E7EB;
+                ">
+                    <div style="font-size: 15px; color: #6B7280; margin-bottom: 8px;">
+                        구매 판단
+                    </div>
+                    <div style="font-size: 34px; font-weight: 800; color: {risk_color}; margin-bottom: 8px;">
+                        {risk_result["purchase_timing_recommendation"]}
+                    </div>
+                    <div style="font-size: 18px; color: #111827; line-height: 1.55;">
+                        {decision_message}
+                    </div>
                 </div>
             </div>
         </div>
@@ -404,9 +782,11 @@ def render_analysis_result(risk_result, matched_feature, arrival_date):
 
         st.dataframe(factor_score_df, use_container_width=True, hide_index=True)
 
-        st.markdown("### 데이터 기반 설명")
-        report = generate_purchase_timing_report(risk_result)
-        st.markdown(report)
+        st.markdown("### AI 2차 검토")
+        if ai_report:
+            st.markdown(ai_report)
+        else:
+            st.warning("AI 설명이 비어 있습니다. 다시 분석을 실행해주세요.")
 
         st.markdown("### 사용된 주요 피처")
 
@@ -437,6 +817,21 @@ def render_analysis_result(risk_result, matched_feature, arrival_date):
         st.dataframe(feature_df, use_container_width=True, hide_index=True)
 
 
+def clear_manual_result():
+    st.session_state["analysis_result"] = None
+    st.session_state["matched_feature"] = None
+    st.session_state["arrival_date"] = None
+    st.session_state["ai_report"] = None
+
+
+def clear_text_result():
+    st.session_state["parsed_request"] = None
+    st.session_state["natural_recommendations"] = None
+    st.session_state["top_ai_report"] = None
+
+
+inject_global_style()
+
 st.title("항공권 가격 상승 위험도 및 구매 타이밍 판단")
 st.caption(
     "공공데이터 기반으로 항공 수요, 운항 공급, 노선 경쟁도, 공휴일, 환율 요인을 분석하여 "
@@ -460,165 +855,380 @@ if "matched_feature" not in st.session_state:
 if "arrival_date" not in st.session_state:
     st.session_state["arrival_date"] = None
 
+if "ai_report" not in st.session_state:
+    st.session_state["ai_report"] = None
+
 if "last_selected_key" not in st.session_state:
     st.session_state["last_selected_key"] = None
 
+if "parsed_request" not in st.session_state:
+    st.session_state["parsed_request"] = None
 
-st.sidebar.header("분석 조건")
+if "natural_recommendations" not in st.session_state:
+    st.session_state["natural_recommendations"] = None
 
-departure_airports = sorted(sample_df["departure_airport"].dropna().unique().tolist())
-available_years = sorted(sample_df["year"].dropna().astype(int).unique().tolist())
+if "top_ai_report" not in st.session_state:
+    st.session_state["top_ai_report"] = None
 
-default_departure_index = departure_airports.index("한국") if "한국" in departure_airports else 0
+if "last_input_mode" not in st.session_state:
+    st.session_state["last_input_mode"] = None
 
-departure_airport = st.sidebar.selectbox(
-    "출발지",
-    departure_airports,
-    index=default_departure_index,
-    format_func=display_airport,
+
+has_manual_result = st.session_state["analysis_result"] is not None
+has_text_result = (
+    st.session_state["parsed_request"] is not None
+    and st.session_state["natural_recommendations"] is not None
 )
 
-arrival_candidates = sample_df[
-    sample_df["departure_airport"] == departure_airport
-]["arrival_airport"].dropna().unique().tolist()
 
-arrival_candidates = sorted(arrival_candidates)
-
-if not arrival_candidates:
-    st.error("선택한 출발지에 해당하는 도착지가 없습니다.")
-    st.stop()
-
-arrival_airport = st.sidebar.selectbox(
-    "도착지",
-    arrival_candidates,
-    format_func=display_airport,
-)
-
-today_date = pd.Timestamp.today().date()
-
-departure_date = st.sidebar.date_input(
-    "출발 예정일",
-    value=today_date + timedelta(days=30),
-)
-
-arrival_date = st.sidebar.date_input(
-    "도착 예정일",
-    value=departure_date + timedelta(days=3),
-)
-
-if arrival_date < departure_date:
-    st.sidebar.error("도착 예정일은 출발 예정일 이후여야 합니다.")
-
-analysis_year = select_analysis_year(available_years, departure_date)
-
-current_selected_key = f"{departure_airport}|{arrival_airport}|{departure_date}|{arrival_date}"
-
-if (
-    st.session_state["last_selected_key"] is not None
-    and st.session_state["last_selected_key"] != current_selected_key
-):
-    st.session_state["analysis_result"] = None
-    st.session_state["matched_feature"] = None
-    st.session_state["arrival_date"] = None
-
-run_button = st.sidebar.button("분석 실행", type="primary", use_container_width=True)
-reset_button = st.sidebar.button("분석 초기화", use_container_width=True)
-
-if reset_button:
-    st.session_state["analysis_result"] = None
-    st.session_state["matched_feature"] = None
-    st.session_state["arrival_date"] = None
-    st.session_state["last_selected_key"] = None
-    st.rerun()
-
-
-if run_button:
-    if arrival_date < departure_date:
-        st.error("도착 예정일은 출발 예정일 이후여야 합니다.")
-    else:
-        try:
-            matched_feature = find_route_feature(
-                df=sample_df,
-                departure_airport=departure_airport,
-                arrival_airport=arrival_airport,
-                departure_date=str(departure_date),
-                year=analysis_year,
-            )
-
-            sample_input = {
-                **matched_feature,
-                "departure_airport": matched_feature.get("departure_airport", departure_airport),
-                "arrival_airport": matched_feature.get("arrival_airport", arrival_airport),
-                "departure_date": str(departure_date),
-                "passenger_growth_rate": matched_feature.get("passenger_growth_rate", 0),
-                "flight_growth_rate": matched_feature.get("flight_growth_rate", 0),
-                "days_to_holiday": matched_feature.get("days_to_holiday", 0),
-                "holiday_name": matched_feature.get("holiday_name", ""),
-                "holiday_count": matched_feature.get("holiday_count", 0),
-                "jpy_krw_change_rate": matched_feature.get("jpy_krw_change_rate", 0),
-                "delay_rate": matched_feature.get("delay_rate", 0),
-                "cancel_count": matched_feature.get("cancel_count", 0),
-                "avg_carrier_count": matched_feature.get("avg_carrier_count", 0),
-                "avg_lcc_share": matched_feature.get("avg_lcc_share", 0),
-            }
-
-            risk_result = run_agent_pipeline(sample_input)
-
-            st.session_state["analysis_result"] = risk_result
-            st.session_state["matched_feature"] = matched_feature
-            st.session_state["arrival_date"] = str(arrival_date)
-            st.session_state["last_selected_key"] = current_selected_key
-
-            st.rerun()
-
-        except Exception as e:
-            st.error("분석 실행 중 오류가 발생했습니다.")
-            st.exception(e)
-
-
-if st.session_state["analysis_result"] is not None:
+if has_manual_result:
     render_analysis_result(
         st.session_state["analysis_result"],
         st.session_state["matched_feature"],
         st.session_state["arrival_date"],
+        st.session_state["ai_report"],
     )
+
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+
+    if st.button("다시 추천받기", type="primary", use_container_width=True):
+        clear_manual_result()
+        st.session_state["last_selected_key"] = None
+        st.rerun()
+
+
+elif has_text_result:
+    render_natural_recommendations(
+        parsed_request=st.session_state["parsed_request"],
+        recommendations=st.session_state["natural_recommendations"],
+        top_ai_report=st.session_state["top_ai_report"],
+    )
+
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+
+    if st.button("다시 추천받기", type="primary", use_container_width=True):
+        clear_text_result()
+        st.rerun()
+
 
 else:
-    st.markdown("### 항공권 구매 타이밍을 확인해보세요")
+    st.markdown("### 분석 조건 입력")
 
-    st.markdown(
-        """
-        왼쪽 사이드바에서 **출발지, 도착지, 출발 예정일, 도착 예정일**을 선택한 뒤  
-        **분석 실행** 버튼을 누르면 구매 타이밍 판단 결과가 표시됩니다.
-        """
-    )
-
-    guide_col1, guide_col2, guide_col3 = st.columns(3)
-
-    with guide_col1:
-        render_metric_card(
-            "1단계",
-            "노선 선택",
-            "출발지와 도착지를 선택합니다.",
+    with st.container(border=True):
+        input_mode = st.radio(
+            "입력 방식 선택",
+            ["날짜 직접 선택", "텍스트로 입력"],
+            horizontal=True,
         )
 
-    with guide_col2:
-        render_metric_card(
-            "2단계",
-            "여행 일정 입력",
-            "출발 예정일과 도착 예정일을 선택합니다.",
+        if (
+            st.session_state["last_input_mode"] is not None
+            and st.session_state["last_input_mode"] != input_mode
+        ):
+            clear_manual_result()
+            clear_text_result()
+
+        st.session_state["last_input_mode"] = input_mode
+
+        if input_mode == "날짜 직접 선택":
+            departure_airports = sorted(sample_df["departure_airport"].dropna().unique().tolist())
+            available_years = sorted(sample_df["year"].dropna().astype(int).unique().tolist())
+
+            default_departure_index = departure_airports.index("ICN") if "ICN" in departure_airports else 0
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                departure_airport = st.selectbox(
+                    "출발지",
+                    departure_airports,
+                    index=default_departure_index,
+                    format_func=display_airport,
+                )
+
+            arrival_candidates = sample_df[
+                sample_df["departure_airport"] == departure_airport
+            ]["arrival_airport"].dropna().unique().tolist()
+
+            arrival_candidates = sorted(arrival_candidates)
+
+            if not arrival_candidates:
+                st.error("선택한 출발지에 해당하는 도착지가 없습니다.")
+                st.stop()
+
+            with col2:
+                arrival_airport = st.selectbox(
+                    "도착지",
+                    arrival_candidates,
+                    format_func=display_airport,
+                )
+
+            today_date = pd.Timestamp.today().date()
+
+            date_col1, date_col2 = st.columns(2)
+
+            with date_col1:
+                departure_date = st.date_input(
+                    "출발 예정일",
+                    value=today_date + timedelta(days=30),
+                )
+
+            with date_col2:
+                arrival_date = st.date_input(
+                    "도착 예정일",
+                    value=departure_date + timedelta(days=3),
+                )
+
+            if arrival_date < departure_date:
+                st.error("도착 예정일은 출발 예정일 이후여야 합니다.")
+
+            analysis_year = select_analysis_year(available_years, departure_date)
+
+            current_selected_key = f"{departure_airport}|{arrival_airport}|{departure_date}|{arrival_date}"
+
+            if (
+                st.session_state["last_selected_key"] is not None
+                and st.session_state["last_selected_key"] != current_selected_key
+            ):
+                clear_manual_result()
+
+            button_col1, button_col2 = st.columns(2)
+
+            with button_col1:
+                run_button = st.button(
+                    "분석 실행",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            with button_col2:
+                reset_button = st.button(
+                    "분석 초기화",
+                    use_container_width=True,
+                )
+
+        else:
+            st.markdown(
+                """
+                여행 가능 기간, 체류 기간, 목적지, 포함 조건을 문장으로 입력하면  
+                AI가 필요한 조건을 추출해 추천 노선을 생성합니다.
+                """
+            )
+
+            natural_text = st.text_area(
+                "여행 조건 입력",
+                value="",
+                height=150,
+                placeholder=(
+                    "예: 내년 추석 일본여행 갈거야. 3박4일로 추천해줘.\n"
+                    "예: 12월20일~12월30일 사이 4박5일로 일본여행 가고 싶어. 크리스마스는 포함됐으면 좋겠어."
+                ),
+            )
+
+            button_col1, button_col2 = st.columns(2)
+
+            with button_col1:
+                natural_run_button = st.button(
+                    "텍스트 조건으로 추천받기",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            with button_col2:
+                natural_reset_button = st.button(
+                    "추천 초기화",
+                    use_container_width=True,
+                )
+
+
+    if input_mode == "날짜 직접 선택":
+        if reset_button:
+            clear_manual_result()
+            st.session_state["last_selected_key"] = None
+            st.rerun()
+
+        if run_button:
+            if arrival_date < departure_date:
+                st.error("도착 예정일은 출발 예정일 이후여야 합니다.")
+            else:
+                loading_placeholder = st.empty()
+
+                try:
+                    loading_placeholder.markdown(
+                        render_loading_overlay("선택한 노선과 여행 일정을 확인하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.35)
+
+                    matched_feature = find_route_feature(
+                        df=sample_df,
+                        departure_airport=departure_airport,
+                        arrival_airport=arrival_airport,
+                        departure_date=str(departure_date),
+                        year=analysis_year,
+                    )
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("수요·공급·경쟁도·연휴 데이터를 분석하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.35)
+
+                    sample_input = build_manual_sample_input(
+                        matched_feature=matched_feature,
+                        departure_airport=departure_airport,
+                        arrival_airport=arrival_airport,
+                        departure_date=departure_date,
+                    )
+
+                    risk_result = run_agent_pipeline(sample_input)
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("AI가 1차 판단 결과를 2차 검토하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+
+                    ai_report = generate_purchase_timing_report(risk_result)
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("분석 결과 화면을 준비하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.25)
+
+                    st.session_state["analysis_result"] = risk_result
+                    st.session_state["matched_feature"] = matched_feature
+                    st.session_state["arrival_date"] = str(arrival_date)
+                    st.session_state["ai_report"] = ai_report
+                    st.session_state["last_selected_key"] = current_selected_key
+
+                    loading_placeholder.empty()
+                    st.rerun()
+
+                except Exception as e:
+                    loading_placeholder.empty()
+                    st.error("분석 실행 중 오류가 발생했습니다.")
+                    st.exception(e)
+
+        st.markdown("### 항공권 구매 타이밍을 확인해보세요")
+
+        st.markdown(
+            """
+            위 입력 박스에서 **출발지, 도착지, 출발 예정일, 도착 예정일**을 선택한 뒤  
+            **분석 실행** 버튼을 누르면 구매 타이밍 판단 결과가 표시됩니다.
+            """
         )
 
-    with guide_col3:
-        render_metric_card(
-            "3단계",
-            "구매 판단 확인",
-            "가격 상승 위험도와 구매 타이밍을 확인합니다.",
-        )
+        guide_col1, guide_col2, guide_col3 = st.columns(3)
 
-    st.markdown("<div style='height: 44px;'></div>", unsafe_allow_html=True)
+        with guide_col1:
+            render_metric_card(
+                "1단계",
+                "노선 선택",
+                "출발지와 도착지를 선택합니다.",
+            )
 
-    render_buy_now_recommendations(sample_df)
+        with guide_col2:
+            render_metric_card(
+                "2단계",
+                "여행 일정 입력",
+                "출발 예정일과 도착 예정일을 선택합니다.",
+            )
+
+        with guide_col3:
+            render_metric_card(
+                "3단계",
+                "구매 판단 확인",
+                "가격 상승 위험도와 구매 타이밍을 확인합니다.",
+            )
+
+        st.markdown("<div style='height: 44px;'></div>", unsafe_allow_html=True)
+
+        render_buy_now_recommendations(sample_df)
+
+
+    else:
+        if natural_reset_button:
+            clear_text_result()
+            st.rerun()
+
+        if natural_run_button:
+            if not natural_text.strip():
+                st.error("여행 조건을 입력해주세요.")
+            else:
+                loading_placeholder = st.empty()
+
+                try:
+                    loading_placeholder.markdown(
+                        render_loading_overlay("AI가 텍스트 입력에서 여행 조건을 추출하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+
+                    parsed_request = parse_travel_request(natural_text)
+                    parsed_request = complete_parsed_request(parsed_request)
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("추출된 조건으로 가능한 여행 일정 후보를 만들고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.35)
+
+                    recommendations = recommend_routes_from_request(
+                        df=sample_df,
+                        parsed_request=parsed_request,
+                    )
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("추천 1순위 결과를 AI가 2차 검토하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+
+                    top_ai_report = generate_purchase_timing_report(
+                        recommendations[0]["risk_result"]
+                    )
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("추천 결과 화면을 준비하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.25)
+
+                    st.session_state["parsed_request"] = parsed_request
+                    st.session_state["natural_recommendations"] = recommendations
+                    st.session_state["top_ai_report"] = top_ai_report
+
+                    loading_placeholder.empty()
+                    st.rerun()
+
+                except Exception as e:
+                    loading_placeholder.empty()
+                    st.error("텍스트 추천 실행 중 오류가 발생했습니다.")
+                    st.exception(e)
+
+        st.markdown("<div style='height: 34px;'></div>", unsafe_allow_html=True)
+
+        guide_col1, guide_col2, guide_col3 = st.columns(3)
+
+        with guide_col1:
+            render_metric_card(
+                "1단계",
+                "텍스트 입력",
+                "휴가 기간과 여행 조건을 문장으로 입력합니다.",
+            )
+
+        with guide_col2:
+            render_metric_card(
+                "2단계",
+                "AI 조건 추출",
+                "여행 가능 기간, 체류일수, 목적지를 추출합니다.",
+            )
+
+        with guide_col3:
+            render_metric_card(
+                "3단계",
+                "추천 결과 확인",
+                "후보 노선별 위험도와 구매 판단을 비교합니다.",
+            )
 
 
 st.markdown("---")
@@ -626,6 +1236,9 @@ st.markdown("---")
 with st.expander("분석 기준 보기", expanded=False):
     st.markdown(
         """
+- 직접 선택 모드: 사용자가 출발지, 도착지, 출발일, 도착일을 직접 입력합니다.
+- 텍스트 입력 모드: AI가 사용자의 문장에서 여행 조건을 추출합니다.
+- 포함 조건: 크리스마스, 추석, 설날 등 사용자가 언급한 특정 날짜·공휴일이 여행 기간 안에 포함되도록 일정 후보를 필터링합니다.
 - 항공 수요: 노선별 여객 증가율
 - 운항 공급: 노선별 운항편 증가율
 - 수요-공급 불균형: 여객 증가율과 운항편 증가율의 차이

@@ -22,4 +22,5 @@ outputs/
 .DS_Store
 
 # Jupyter
-.ipynb_checkpoints/
+.ipynb_checkpoints/DB/
+data/raw/
