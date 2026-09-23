@@ -1,766 +1,703 @@
-import re
-from pathlib import Path
-from datetime import datetime, date, timedelta
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from src.data_loader import find_route_feature
 from src.agents import run_agent_pipeline
+from src.data_loader import find_route_feature, normalize_airport_code
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-HOLIDAY_PATH = ROOT_DIR / "data" / "processed" / "processed_holidays_clean.csv"
+DEFAULT_DEPARTURE_AIRPORT = "ICN"
+DEFAULT_DESTINATION_COUNTRY = "일본"
+DEFAULT_RECOMMENDATION_COUNT = 5
+MAX_DATE_CANDIDATES = 40
 
 
-CITY_TO_AIRPORT = {
+JAPAN_CITY_TO_AIRPORT_CODES = {
     "도쿄": ["NRT", "HND"],
+    "나리타": ["NRT"],
+    "하네다": ["HND"],
     "오사카": ["KIX"],
+    "간사이": ["KIX"],
     "후쿠오카": ["FUK"],
     "삿포로": ["CTS"],
+    "치토세": ["CTS"],
     "오키나와": ["OKA"],
+    "오끼나와": ["OKA"],
     "나고야": ["NGO"],
     "고베": ["UKB"],
     "구마모토": ["KMJ"],
+    "구마모도": ["KMJ"],
     "히로시마": ["HIJ"],
-    "마쓰야마": ["MYJ"],
-    "가고시마": ["KOJ"],
-    "오이타": ["OIT"],
-    "미야자키": ["KMI"],
-    "다카마쓰": ["TAK"],
     "센다이": ["SDJ"],
     "아오모리": ["AOJ"],
     "시즈오카": ["FSZ"],
-    "니가타": ["KIJ"],
-    "오카야마": ["OKJ"],
     "요나고": ["YGJ"],
-    "기타큐슈": ["KKJ"],
-    "이시가키": ["ISG"],
-    "나가사키": ["NGS"],
 }
 
 
-HOLIDAY_KEYWORDS = {
-    "크리스마스": ["크리스마스", "성탄절", "christmas"],
-    "성탄절": ["크리스마스", "성탄절", "christmas"],
-    "설날": ["설날", "설", "구정"],
-    "추석": ["추석", "한가위"],
-    "삼일절": ["삼일절", "3.1절", "3·1절"],
-    "어린이날": ["어린이날"],
-    "부처님오신날": ["부처님오신날", "석가탄신일"],
-    "현충일": ["현충일"],
-    "광복절": ["광복절"],
-    "개천절": ["개천절"],
-    "한글날": ["한글날"],
-    "신정": ["신정", "새해", "1월1일", "1월 1일"],
-}
-
-
-FALLBACK_HOLIDAYS = {
+HOLIDAY_FALLBACK_DATES = {
     2027: {
-        "설날": ["2027-02-06", "2027-02-07", "2027-02-08", "2027-02-09"],
+        "설날": ["2027-02-06", "2027-02-07", "2027-02-08"],
         "추석": ["2027-09-14", "2027-09-15", "2027-09-16"],
         "크리스마스": ["2027-12-25"],
-        "성탄절": ["2027-12-25"],
-        "신정": ["2027-01-01"],
-        "삼일절": ["2027-03-01"],
-        "어린이날": ["2027-05-05"],
-        "부처님오신날": ["2027-05-13"],
-        "현충일": ["2027-06-06"],
-        "광복절": ["2027-08-15"],
-        "개천절": ["2027-10-03"],
-        "한글날": ["2027-10-09"],
-    }
+    },
+    2026: {
+        "설날": ["2026-02-16", "2026-02-17", "2026-02-18"],
+        "추석": ["2026-09-24", "2026-09-25", "2026-09-26"],
+        "크리스마스": ["2026-12-25"],
+    },
 }
 
 
-DEPARTURE_KEYWORDS = {
-    "인천": "ICN",
-    "김포": "GMP",
-    "부산": "PUS",
-    "김해": "PUS",
-    "제주": "CJU",
-}
-
-
-def _safe_date(year: int, month: int, day: int) -> Optional[date]:
+def _safe_int(value: Any, default: int) -> int:
     try:
-        return date(int(year), int(month), int(day))
+        if value is None:
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _parse_date(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d")
     except Exception:
         return None
 
 
-def _resolve_future_year(month: int, day: int) -> int:
-    today = datetime.today().date()
-    candidate = _safe_date(today.year, month, day)
-
-    if candidate and candidate >= today:
-        return today.year
-
-    return today.year + 1
+def _format_date(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d")
 
 
-def _detect_relative_year(raw_text: str) -> Optional[int]:
-    today = datetime.today().date()
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
 
-    if "내년" in raw_text or "다음해" in raw_text or "다음 년" in raw_text:
-        return today.year + 1
-
-    if "올해" in raw_text or "이번해" in raw_text:
-        return today.year
-
-    match = re.search(r"(20\d{2})\s*년", raw_text)
-
-    if match:
-        return int(match.group(1))
-
-    return None
-
-
-def _parse_date(value):
-    if not value:
-        return None
-
-    try:
-        return pd.to_datetime(str(value)[:10]).date()
-    except Exception:
-        return None
-
-
-def _coerce_list(value):
     if isinstance(value, list):
         return value
 
-    if value is None:
-        return []
+    if isinstance(value, tuple):
+        return list(value)
+
+    if isinstance(value, set):
+        return list(value)
 
     return [value]
 
 
-def _parse_korean_date_range(raw_text: str) -> Dict[str, Optional[str]]:
-    compact_text = re.sub(r"\s+", "", raw_text)
-    relative_year = _detect_relative_year(raw_text)
-
-    patterns = [
-        r"(?:(\d{4})년)?(\d{1,2})월(\d{1,2})일?(?:부터|에서|~|-|–|—)(?:(\d{4})년)?(?:(\d{1,2})월)?(\d{1,2})일?",
-        r"(?:(\d{4})[./-])?(\d{1,2})[./-](\d{1,2})(?:부터|에서|~|-|–|—)(?:(\d{4})[./-])?(?:(\d{1,2})[./-])?(\d{1,2})",
+def _extract_year(parsed_request: Dict[str, Any]) -> int:
+    year_candidates = [
+        parsed_request.get("year"),
+        parsed_request.get("travel_year"),
+        parsed_request.get("target_year"),
     ]
 
-    for pattern in patterns:
-        match = re.search(pattern, compact_text)
+    for value in year_candidates:
+        parsed_year = _safe_int(value, 0)
 
-        if not match:
-            continue
+        if parsed_year > 0:
+            return parsed_year
 
-        start_year_text, start_month, start_day, end_year_text, end_month, end_day = match.groups()
+    today = datetime.today()
 
-        start_month = int(start_month)
-        start_day = int(start_day)
-        end_month = int(end_month) if end_month else start_month
-        end_day = int(end_day)
+    text_candidates = [
+        parsed_request.get("text"),
+        parsed_request.get("raw_text"),
+        parsed_request.get("original_text"),
+        parsed_request.get("user_text"),
+        parsed_request.get("raw_user_text"),
+        parsed_request.get("travel_period"),
+        parsed_request.get("date_text"),
+    ]
 
-        if start_year_text:
-            start_year = int(start_year_text)
-        elif relative_year:
-            start_year = relative_year
-        else:
-            start_year = _resolve_future_year(start_month, start_day)
+    joined_text = " ".join([_safe_str(value) for value in text_candidates])
 
-        if end_year_text:
-            end_year = int(end_year_text)
-        else:
-            end_year = start_year
+    if "내년" in joined_text:
+        return today.year + 1
 
-        start_date = _safe_date(start_year, start_month, start_day)
-        end_date = _safe_date(end_year, end_month, end_day)
+    if "올해" in joined_text:
+        return today.year
 
-        if start_date and end_date and end_date < start_date:
-            end_date = _safe_date(end_year + 1, end_month, end_day)
-
-        if start_date and end_date:
-            return {
-                "travel_window_start": str(start_date),
-                "travel_window_end": str(end_date),
-            }
-
-    return {
-        "travel_window_start": None,
-        "travel_window_end": None,
-    }
+    return today.year
 
 
-def _parse_stay_duration(raw_text: str) -> Dict[str, Optional[int]]:
-    match = re.search(r"(\d+)\s*박\s*(\d+)\s*일", raw_text)
+def _extract_trip_days(parsed_request: Dict[str, Any]) -> int:
+    candidates = [
+        parsed_request.get("trip_days"),
+        parsed_request.get("travel_days"),
+        parsed_request.get("duration_days"),
+        parsed_request.get("stay_days"),
+        parsed_request.get("days"),
+    ]
 
-    if match:
-        return {
-            "nights": int(match.group(1)),
-            "days": int(match.group(2)),
-        }
+    for value in candidates:
+        parsed_value = _safe_int(value, 0)
 
-    match = re.search(r"(\d+)\s*박", raw_text)
+        if parsed_value > 0:
+            return parsed_value
 
-    if match:
-        nights = int(match.group(1))
+    night_candidates = [
+        parsed_request.get("trip_nights"),
+        parsed_request.get("nights"),
+        parsed_request.get("stay_nights"),
+    ]
 
-        return {
-            "nights": nights,
-            "days": nights + 1,
-        }
+    for value in night_candidates:
+        parsed_value = _safe_int(value, 0)
 
-    return {
-        "nights": None,
-        "days": None,
-    }
+        if parsed_value > 0:
+            return parsed_value + 1
 
+    text_candidates = [
+        parsed_request.get("text"),
+        parsed_request.get("raw_text"),
+        parsed_request.get("original_text"),
+        parsed_request.get("user_text"),
+        parsed_request.get("raw_user_text"),
+    ]
 
-def _detect_departure_airport(raw_text: str) -> Optional[str]:
-    for keyword, code in DEPARTURE_KEYWORDS.items():
-        if keyword in raw_text and ("출발" in raw_text or "에서" in raw_text):
-            return code
+    joined_text = " ".join([_safe_str(value) for value in text_candidates])
 
-    return None
+    if "3박4일" in joined_text or "3박 4일" in joined_text:
+        return 4
 
+    if "2박3일" in joined_text or "2박 3일" in joined_text:
+        return 3
 
-def _detect_destination_city(raw_text: str) -> Optional[str]:
-    for city in CITY_TO_AIRPORT.keys():
-        if city in raw_text:
-            return city
+    if "4박5일" in joined_text or "4박 5일" in joined_text:
+        return 5
 
-    return None
-
-
-def _detect_holiday_names(raw_text: str) -> List[str]:
-    raw_text_lower = raw_text.lower()
-    detected = []
-
-    for holiday_name, keywords in HOLIDAY_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword.lower() in raw_text_lower:
-                detected.append(holiday_name)
-                break
-
-    return sorted(set(detected))
+    return 4
 
 
-def _get_target_year(parsed_request: Dict[str, Any]) -> int:
-    raw_text = str(parsed_request.get("raw_user_text") or "")
-    relative_year = _detect_relative_year(raw_text)
+def _extract_holiday_names(parsed_request: Dict[str, Any]) -> List[str]:
+    names = []
 
-    if relative_year:
-        return relative_year
+    for key in [
+        "must_include_holiday_names",
+        "holiday_names",
+        "target_holidays",
+        "holidays",
+    ]:
+        for value in _as_list(parsed_request.get(key)):
+            text = _safe_str(value)
 
-    for key in ["travel_window_start", "preferred_departure_date"]:
-        parsed_date = _parse_date(parsed_request.get(key))
+            if text:
+                names.append(text)
 
-        if parsed_date:
-            return parsed_date.year
+    text_candidates = [
+        parsed_request.get("text"),
+        parsed_request.get("raw_text"),
+        parsed_request.get("original_text"),
+        parsed_request.get("user_text"),
+        parsed_request.get("raw_user_text"),
+        parsed_request.get("travel_period"),
+        parsed_request.get("date_text"),
+    ]
 
-    return datetime.today().year
+    joined_text = " ".join([_safe_str(value) for value in text_candidates])
 
+    for holiday_name in ["추석", "설날", "크리스마스"]:
+        if holiday_name in joined_text:
+            names.append(holiday_name)
 
-def _find_holiday_dates_from_csv(
-    holiday_names: List[str],
-    target_year: int,
-    travel_window_start=None,
-    travel_window_end=None,
-) -> List[str]:
-    if not HOLIDAY_PATH.exists():
-        return []
+    result = []
 
-    if not holiday_names:
-        return []
+    for name in names:
+        if name not in result:
+            result.append(name)
 
-    start_date = _parse_date(travel_window_start)
-    end_date = _parse_date(travel_window_end)
-
-    try:
-        holiday_df = pd.read_csv(HOLIDAY_PATH, encoding="utf-8-sig")
-    except Exception:
-        return []
-
-    matched_dates = []
-
-    for _, row in holiday_df.iterrows():
-        date_value = (
-            row.get("holiday_date")
-            or row.get("date")
-            or row.get("locdate")
-            or row.get("date_value")
-        )
-
-        holiday_date = _parse_date(date_value)
-
-        if not holiday_date:
-            continue
-
-        if holiday_date.year != target_year:
-            continue
-
-        if start_date and holiday_date < start_date:
-            continue
-
-        if end_date and holiday_date > end_date:
-            continue
-
-        row_text = " ".join([str(value) for value in row.values if pd.notna(value)])
-
-        for holiday_name in holiday_names:
-            keywords = HOLIDAY_KEYWORDS.get(holiday_name, [holiday_name])
-
-            if any(keyword in row_text for keyword in keywords):
-                matched_dates.append(str(holiday_date))
-                break
-
-    return sorted(set(matched_dates))
+    return result
 
 
-def _find_holiday_dates_from_fallback(
-    holiday_names: List[str],
-    target_year: int,
-    travel_window_start=None,
-    travel_window_end=None,
-) -> List[str]:
-    year_map = FALLBACK_HOLIDAYS.get(target_year, {})
-    start_date = _parse_date(travel_window_start)
-    end_date = _parse_date(travel_window_end)
+def _extract_required_dates(parsed_request: Dict[str, Any], year: int) -> List[str]:
+    dates = []
 
-    matched_dates = []
+    for key in [
+        "required_include_dates",
+        "must_include_dates",
+        "include_dates",
+        "holiday_dates",
+    ]:
+        for value in _as_list(parsed_request.get(key)):
+            parsed_date = _parse_date(value)
+
+            if parsed_date:
+                dates.append(_format_date(parsed_date))
+
+    if dates:
+        return sorted(list(set(dates)))
+
+    holiday_names = _extract_holiday_names(parsed_request)
 
     for holiday_name in holiday_names:
-        for date_text in year_map.get(holiday_name, []):
-            holiday_date = _parse_date(date_text)
+        fallback_dates = HOLIDAY_FALLBACK_DATES.get(year, {}).get(holiday_name, [])
 
-            if not holiday_date:
-                continue
+        for fallback_date in fallback_dates:
+            dates.append(fallback_date)
 
-            if start_date and holiday_date < start_date:
-                continue
+    return sorted(list(set(dates)))
 
-            if end_date and holiday_date > end_date:
-                continue
 
-            matched_dates.append(str(holiday_date))
+def _extract_date_window(
+    parsed_request: Dict[str, Any],
+    trip_days: int,
+    required_dates: List[str],
+    year: int,
+) -> Dict[str, str]:
+    start_candidates = [
+        parsed_request.get("earliest_departure_date"),
+        parsed_request.get("start_date"),
+        parsed_request.get("departure_start_date"),
+        parsed_request.get("min_departure_date"),
+        parsed_request.get("travel_window_start"),
+        parsed_request.get("preferred_departure_date"),
+    ]
 
-    return sorted(set(matched_dates))
+    end_candidates = [
+        parsed_request.get("latest_departure_date"),
+        parsed_request.get("end_date"),
+        parsed_request.get("departure_end_date"),
+        parsed_request.get("max_departure_date"),
+        parsed_request.get("travel_window_end"),
+        parsed_request.get("preferred_return_date"),
+    ]
+
+    start_date = None
+    end_date = None
+
+    for value in start_candidates:
+        start_date = _parse_date(value)
+
+        if start_date:
+            break
+
+    for value in end_candidates:
+        end_date = _parse_date(value)
+
+        if end_date:
+            break
+
+    if required_dates:
+        parsed_required_dates = [_parse_date(value) for value in required_dates]
+        parsed_required_dates = [value for value in parsed_required_dates if value]
+
+        if parsed_required_dates:
+            first_required_date = min(parsed_required_dates)
+            last_required_date = max(parsed_required_dates)
+
+            required_start = first_required_date - timedelta(days=trip_days - 1)
+            required_end = last_required_date
+
+            if start_date is None:
+                start_date = required_start
+
+            if end_date is None:
+                end_date = required_end
+
+    if start_date is None:
+        start_date = datetime(year, 1, 1)
+
+    if end_date is None:
+        end_date = datetime(year, 12, 31)
+
+    if end_date < start_date:
+        end_date = start_date
+
+    return {
+        "earliest_departure_date": _format_date(start_date),
+        "latest_departure_date": _format_date(end_date),
+    }
 
 
 def complete_parsed_request(parsed_request: Dict[str, Any]) -> Dict[str, Any]:
-    parsed = dict(parsed_request)
-    raw_text = str(parsed.get("raw_user_text") or "").strip()
+    result = dict(parsed_request or {})
 
-    parsed.setdefault("departure_airport", "ICN")
-    parsed.setdefault("destination_country", None)
-    parsed.setdefault("destination_city", None)
-    parsed.setdefault("travel_window_start", None)
-    parsed.setdefault("travel_window_end", None)
-    parsed.setdefault("preferred_departure_date", None)
-    parsed.setdefault("preferred_return_date", None)
-    parsed.setdefault("nights", None)
-    parsed.setdefault("days", None)
-    parsed.setdefault("must_include_dates", [])
-    parsed.setdefault("must_include_holiday_names", [])
-    parsed.setdefault("recommendation_count", 5)
+    year = _extract_year(result)
+    trip_days = _extract_trip_days(result)
+    required_dates = _extract_required_dates(result, year)
+    holiday_names = _extract_holiday_names(result)
 
-    if raw_text:
-        date_range = _parse_korean_date_range(raw_text)
-        stay_duration = _parse_stay_duration(raw_text)
-
-        if date_range["travel_window_start"] and date_range["travel_window_end"]:
-            parsed["travel_window_start"] = date_range["travel_window_start"]
-            parsed["travel_window_end"] = date_range["travel_window_end"]
-            parsed["preferred_departure_date"] = None
-            parsed["preferred_return_date"] = None
-
-        if stay_duration["nights"] is not None:
-            parsed["nights"] = stay_duration["nights"]
-            parsed["days"] = stay_duration["days"]
-
-        detected_departure = _detect_departure_airport(raw_text)
-
-        if detected_departure:
-            parsed["departure_airport"] = detected_departure
-
-        if "일본" in raw_text:
-            parsed["destination_country"] = "일본"
-
-        detected_city = _detect_destination_city(raw_text)
-
-        if detected_city:
-            parsed["destination_city"] = detected_city
-
-        holiday_names = _coerce_list(parsed.get("must_include_holiday_names"))
-
-        for holiday_name in _detect_holiday_names(raw_text):
-            if holiday_name not in holiday_names:
-                holiday_names.append(holiday_name)
-
-        parsed["must_include_holiday_names"] = holiday_names
-
-    if not parsed.get("departure_airport"):
-        parsed["departure_airport"] = "ICN"
-
-    target_year = _get_target_year(parsed)
-
-    must_include_dates = _coerce_list(parsed.get("must_include_dates"))
-    must_include_holiday_names = _coerce_list(parsed.get("must_include_holiday_names"))
-
-    if "크리스마스" in must_include_holiday_names or "성탄절" in must_include_holiday_names:
-        christmas_date = f"{target_year}-12-25"
-
-        if christmas_date not in must_include_dates:
-            must_include_dates.append(christmas_date)
-
-    if "신정" in must_include_holiday_names:
-        new_year_date = f"{target_year}-01-01"
-
-        if new_year_date not in must_include_dates:
-            must_include_dates.append(new_year_date)
-
-    csv_dates = _find_holiday_dates_from_csv(
-        holiday_names=must_include_holiday_names,
-        target_year=target_year,
-        travel_window_start=parsed.get("travel_window_start"),
-        travel_window_end=parsed.get("travel_window_end"),
+    date_window = _extract_date_window(
+        parsed_request=result,
+        trip_days=trip_days,
+        required_dates=required_dates,
+        year=year,
     )
 
-    fallback_dates = _find_holiday_dates_from_fallback(
-        holiday_names=must_include_holiday_names,
-        target_year=target_year,
-        travel_window_start=parsed.get("travel_window_start"),
-        travel_window_end=parsed.get("travel_window_end"),
+    result["year"] = year
+    result["trip_days"] = trip_days
+    result["travel_days"] = trip_days
+    result["departure_airport"] = normalize_airport_code(
+        result.get("departure_airport")
+        or result.get("origin_airport")
+        or result.get("origin")
+        or DEFAULT_DEPARTURE_AIRPORT
     )
+    result["destination_country"] = (
+        result.get("destination_country")
+        or result.get("country")
+        or DEFAULT_DESTINATION_COUNTRY
+    )
+    result["must_include_dates"] = required_dates
+    result["required_include_dates"] = required_dates
+    result["must_include_holiday_names"] = holiday_names
+    result.update(date_window)
 
-    for holiday_date in csv_dates + fallback_dates:
-        if holiday_date not in must_include_dates:
-            must_include_dates.append(holiday_date)
+    return result
 
-    parsed["must_include_dates"] = sorted(set(must_include_dates))
-    parsed["must_include_holiday_names"] = sorted(set(must_include_holiday_names))
 
-    return parsed
+def _count_required_dates_in_range(
+    departure_date: datetime,
+    return_date: datetime,
+    required_dates: List[str],
+) -> int:
+    if not required_dates:
+        return 0
+
+    count = 0
+
+    for value in required_dates:
+        parsed_required_date = _parse_date(value)
+
+        if parsed_required_date and departure_date <= parsed_required_date <= return_date:
+            count += 1
+
+    return count
 
 
 def _date_range_matches_required_dates(
-    departure_date,
-    return_date,
+    departure_date: datetime,
+    return_date: datetime,
     required_dates: List[str],
 ) -> bool:
     if not required_dates:
         return True
 
-    departure_date = _parse_date(departure_date)
-    return_date = _parse_date(return_date)
-
-    if not departure_date or not return_date:
-        return False
-
-    for required_date in required_dates:
-        required = _parse_date(required_date)
-
-        if required is None:
-            continue
-
-        if departure_date <= required <= return_date:
-            return True
-
-    return False
+    return _count_required_dates_in_range(
+        departure_date=departure_date,
+        return_date=return_date,
+        required_dates=required_dates,
+    ) > 0
 
 
-def generate_date_candidates(parsed_request: Dict[str, Any]) -> List[Dict[str, str]]:
-    parsed_request = complete_parsed_request(parsed_request)
+def _generate_candidate_dates(parsed_request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    trip_days = _safe_int(parsed_request.get("trip_days"), 4)
+    trip_days = max(trip_days, 1)
 
-    preferred_departure_date = parsed_request.get("preferred_departure_date")
-    preferred_return_date = parsed_request.get("preferred_return_date")
-    required_dates = _coerce_list(parsed_request.get("must_include_dates"))
-    nights = parsed_request.get("nights")
+    start_date = _parse_date(parsed_request.get("earliest_departure_date"))
+    end_date = _parse_date(parsed_request.get("latest_departure_date"))
 
-    if nights is None:
-        raise ValueError(f"체류 기간을 찾지 못했습니다. 예: 3박4일 / 추출 결과: {parsed_request}")
+    if start_date is None:
+        start_date = datetime(_extract_year(parsed_request), 1, 1)
 
-    if preferred_departure_date and preferred_return_date:
-        if not _date_range_matches_required_dates(
-            preferred_departure_date,
-            preferred_return_date,
-            required_dates,
-        ):
-            raise ValueError("지정한 출도착 일정에 포함 조건이 반영되지 않습니다.")
+    if end_date is None:
+        end_date = datetime(_extract_year(parsed_request), 12, 31)
 
-        return [
-            {
-                "departure_date": preferred_departure_date,
-                "return_date": preferred_return_date,
-            }
-        ]
-
-    travel_window_start = parsed_request.get("travel_window_start")
-    travel_window_end = parsed_request.get("travel_window_end")
-
-    candidates = []
-
-    if travel_window_start and travel_window_end:
-        start_date = pd.to_datetime(travel_window_start).date()
-        end_date = pd.to_datetime(travel_window_end).date()
-        current_departure = start_date
-
-        while current_departure + timedelta(days=int(nights)) <= end_date:
-            return_date = current_departure + timedelta(days=int(nights))
-
-            candidate = {
-                "departure_date": str(current_departure),
-                "return_date": str(return_date),
-            }
-
-            if _date_range_matches_required_dates(
-                candidate["departure_date"],
-                candidate["return_date"],
-                required_dates,
-            ):
-                candidates.append(candidate)
-
-            current_departure += timedelta(days=1)
-
-    elif required_dates:
-        parsed_required_dates = sorted(
-            [
-                _parse_date(required_date)
-                for required_date in required_dates
-                if _parse_date(required_date)
-            ]
-        )
-
-        if not parsed_required_dates:
-            raise ValueError(f"포함 조건 날짜를 해석하지 못했습니다. 추출 결과: {parsed_request}")
-
-        first_required_date = parsed_required_dates[0]
-        last_required_date = parsed_required_dates[-1]
-
-        earliest_departure = first_required_date - timedelta(days=int(nights))
-        latest_departure = last_required_date
-
-        current_departure = earliest_departure
-
-        while current_departure <= latest_departure:
-            return_date = current_departure + timedelta(days=int(nights))
-
-            candidate = {
-                "departure_date": str(current_departure),
-                "return_date": str(return_date),
-            }
-
-            if _date_range_matches_required_dates(
-                candidate["departure_date"],
-                candidate["return_date"],
-                required_dates,
-            ):
-                candidates.append(candidate)
-
-            current_departure += timedelta(days=1)
-
-    else:
-        raise ValueError(f"여행 가능 기간 또는 공휴일 기준 조건을 찾지 못했습니다. 추출 결과: {parsed_request}")
-
-    if not candidates:
-        raise ValueError(
-            f"입력 조건 안에서 포함 조건 {required_dates}를 만족하는 일정을 만들 수 없습니다."
-        )
-
-    unique_candidates = []
-    seen = set()
-
-    for candidate in candidates:
-        key = (candidate["departure_date"], candidate["return_date"])
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_candidates.append(candidate)
-
-    return unique_candidates
-
-
-def filter_destination_airports(
-    df: pd.DataFrame,
-    departure_airport: str,
-    parsed_request: Dict[str, Any],
-) -> List[str]:
-    parsed_request = complete_parsed_request(parsed_request)
-
-    available_arrivals = (
-        df[df["departure_airport"] == departure_airport]["arrival_airport"]
-        .dropna()
-        .unique()
-        .tolist()
+    required_dates = (
+        parsed_request.get("required_include_dates")
+        or parsed_request.get("must_include_dates")
+        or []
     )
 
-    destination_city = parsed_request.get("destination_city")
-    destination_country = parsed_request.get("destination_country")
+    candidates = []
+    current_date = start_date
 
-    if destination_city:
-        city_airports = CITY_TO_AIRPORT.get(destination_city, [])
-        matched = [airport for airport in available_arrivals if airport in city_airports]
+    while current_date <= end_date:
+        return_date = current_date + timedelta(days=trip_days - 1)
 
-        if matched:
-            return matched
+        required_date_match_count = _count_required_dates_in_range(
+            departure_date=current_date,
+            return_date=return_date,
+            required_dates=required_dates,
+        )
 
-    if destination_country == "일본":
-        return sorted(available_arrivals)
+        if not required_dates or required_date_match_count > 0:
+            candidates.append(
+                {
+                    "departure_date": _format_date(current_date),
+                    "return_date": _format_date(return_date),
+                    "required_date_match_count": required_date_match_count,
+                }
+            )
 
-    return sorted(available_arrivals)
+        current_date += timedelta(days=1)
+
+    candidates = sorted(
+        candidates,
+        key=lambda item: (
+            -item.get("required_date_match_count", 0),
+            item.get("departure_date", ""),
+        ),
+    )
+
+    if len(candidates) <= MAX_DATE_CANDIDATES:
+        return candidates
+
+    step = max(len(candidates) // MAX_DATE_CANDIDATES, 1)
+    sampled_candidates = candidates[::step][:MAX_DATE_CANDIDATES]
+
+    return sampled_candidates
 
 
-def build_sample_input(matched_feature: Dict[str, Any], departure_date: str) -> Dict[str, Any]:
+def _extract_destination_airport_codes(parsed_request: Dict[str, Any]) -> List[str]:
+    codes = []
+
+    for key in [
+        "arrival_airport",
+        "destination_airport",
+        "arrival_airport_code",
+        "destination_airport_code",
+    ]:
+        value = parsed_request.get(key)
+
+        if value:
+            codes.append(normalize_airport_code(value))
+
+    keyword_values = []
+
+    for key in [
+        "destination",
+        "destination_city",
+        "city",
+        "travel_destination",
+        "destination_keywords",
+        "keywords",
+    ]:
+        keyword_values.extend(_as_list(parsed_request.get(key)))
+
+    text_candidates = [
+        parsed_request.get("text"),
+        parsed_request.get("raw_text"),
+        parsed_request.get("original_text"),
+        parsed_request.get("user_text"),
+        parsed_request.get("raw_user_text"),
+    ]
+
+    keyword_values.extend(text_candidates)
+
+    joined_text = " ".join([_safe_str(value) for value in keyword_values])
+
+    for city_name, airport_codes in JAPAN_CITY_TO_AIRPORT_CODES.items():
+        if city_name in joined_text:
+            codes.extend(airport_codes)
+
+    result = []
+
+    for code in codes:
+        code = normalize_airport_code(code)
+
+        if code and code not in result:
+            result.append(code)
+
+    return result
+
+
+def _filter_candidate_routes(
+    df: pd.DataFrame,
+    parsed_request: Dict[str, Any],
+) -> pd.DataFrame:
+    departure_airport = normalize_airport_code(
+        parsed_request.get("departure_airport") or DEFAULT_DEPARTURE_AIRPORT
+    )
+
+    route_df = df[df["departure_airport"] == departure_airport].copy()
+
+    destination_codes = _extract_destination_airport_codes(parsed_request)
+
+    if destination_codes:
+        route_df = route_df[route_df["arrival_airport"].isin(destination_codes)].copy()
+
+    if route_df.empty:
+        return route_df
+
+    return (
+        route_df
+        .sort_values(["year", "normalized_base_risk_score"], ascending=[False, False])
+        .drop_duplicates(subset=["departure_airport", "arrival_airport"])
+        .copy()
+    )
+
+
+def _build_sample_input(
+    matched_feature: Dict[str, Any],
+    departure_date: str,
+    return_date: Optional[str],
+    parsed_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    sample_input = dict(matched_feature)
+
+    sample_input["departure_date"] = departure_date
+
+    if return_date:
+        sample_input["return_date"] = return_date
+
+    sample_input["required_include_dates"] = (
+        parsed_request.get("required_include_dates")
+        or parsed_request.get("must_include_dates")
+        or []
+    )
+    sample_input["must_include_dates"] = sample_input["required_include_dates"]
+    sample_input["must_include_holiday_names"] = (
+        parsed_request.get("must_include_holiday_names")
+        or []
+    )
+
+    if sample_input["must_include_holiday_names"]:
+        sample_input["holiday_name"] = ", ".join(sample_input["must_include_holiday_names"])
+        sample_input["holiday_count"] = max(
+            len(sample_input["required_include_dates"]),
+            1,
+        )
+
+    return sample_input
+
+
+def _build_recommendation_item(
+    route_feature: Dict[str, Any],
+    risk_result: Dict[str, Any],
+    departure_date: str,
+    return_date: str,
+    trip_days: int,
+    required_date_match_count: int,
+) -> Dict[str, Any]:
     return {
-        **matched_feature,
-        "departure_airport": matched_feature.get("departure_airport"),
-        "arrival_airport": matched_feature.get("arrival_airport"),
+        "route": route_feature.get("route"),
+        "route_name": route_feature.get("route_name") or route_feature.get("route"),
+        "departure_airport": route_feature.get("departure_airport"),
+        "arrival_airport": route_feature.get("arrival_airport"),
         "departure_date": departure_date,
-        "passenger_growth_rate": matched_feature.get("passenger_growth_rate", 0),
-        "flight_growth_rate": matched_feature.get("flight_growth_rate", 0),
-        "days_to_holiday": matched_feature.get("days_to_holiday", 0),
-        "holiday_name": matched_feature.get("holiday_name", ""),
-        "holiday_count": matched_feature.get("holiday_count", 0),
-        "jpy_krw_change_rate": matched_feature.get("jpy_krw_change_rate", 0),
-        "delay_rate": matched_feature.get("delay_rate", 0),
-        "cancel_count": matched_feature.get("cancel_count", 0),
-        "avg_carrier_count": matched_feature.get("avg_carrier_count", 0),
-        "avg_lcc_share": matched_feature.get("avg_lcc_share", 0),
+        "return_date": return_date,
+        "trip_days": trip_days,
+        "required_date_match_count": required_date_match_count,
+        "risk_score": risk_result.get("risk_score"),
+        "risk_level": risk_result.get("risk_level"),
+        "purchase_timing_recommendation": risk_result.get("purchase_timing_recommendation"),
+        "decision_reason": risk_result.get("decision_reason"),
+        "reason": risk_result.get("decision_reason"),
+        "factor_scores": risk_result.get("factor_scores"),
+        "risk_method": risk_result.get("risk_method"),
+        "risk_score_description": risk_result.get("risk_score_description"),
+        "risk_result": risk_result,
+        "matched_feature": route_feature,
     }
 
 
-def _select_diverse_recommendations(
-    results: List[Dict[str, Any]],
-    recommendation_count: int,
-) -> List[Dict[str, Any]]:
-    sorted_results = sorted(
-        results,
-        key=lambda item: item.get("risk_score") if item.get("risk_score") is not None else -1,
-        reverse=True,
-    )
+def _is_better_recommendation(
+    candidate_item: Dict[str, Any],
+    current_best_item: Dict[str, Any],
+) -> bool:
+    candidate_score = candidate_item.get("risk_score") or 0
+    current_score = current_best_item.get("risk_score") or 0
 
-    selected = []
-    used_routes = set()
+    if candidate_score != current_score:
+        return candidate_score > current_score
 
-    for item in sorted_results:
-        route_key = (
-            item.get("departure_airport"),
-            item.get("arrival_airport"),
-        )
+    candidate_match_count = candidate_item.get("required_date_match_count") or 0
+    current_match_count = current_best_item.get("required_date_match_count") or 0
 
-        if route_key in used_routes:
-            continue
+    if candidate_match_count != current_match_count:
+        return candidate_match_count > current_match_count
 
-        selected.append(item)
-        used_routes.add(route_key)
-
-        if len(selected) >= recommendation_count:
-            break
-
-    if len(selected) < recommendation_count:
-        used_items = {
-            (
-                item.get("departure_airport"),
-                item.get("arrival_airport"),
-                item.get("departure_date"),
-                item.get("return_date"),
-            )
-            for item in selected
-        }
-
-        for item in sorted_results:
-            item_key = (
-                item.get("departure_airport"),
-                item.get("arrival_airport"),
-                item.get("departure_date"),
-                item.get("return_date"),
-            )
-
-            if item_key in used_items:
-                continue
-
-            selected.append(item)
-            used_items.add(item_key)
-
-            if len(selected) >= recommendation_count:
-                break
-
-    return selected
+    return str(candidate_item.get("departure_date")) < str(current_best_item.get("departure_date"))
 
 
 def recommend_routes_from_request(
     df: pd.DataFrame,
     parsed_request: Dict[str, Any],
+    recommendation_count: int = DEFAULT_RECOMMENDATION_COUNT,
 ) -> List[Dict[str, Any]]:
     parsed_request = complete_parsed_request(parsed_request)
 
-    departure_airport = parsed_request.get("departure_airport") or "ICN"
-    recommendation_count = int(parsed_request.get("recommendation_count") or 5)
-
-    date_candidates = generate_date_candidates(parsed_request)
-    arrival_airports = filter_destination_airports(
+    candidate_routes = _filter_candidate_routes(
         df=df,
-        departure_airport=departure_airport,
         parsed_request=parsed_request,
     )
 
-    results = []
+    if candidate_routes.empty:
+        raise ValueError("입력 조건에 맞는 후보 노선을 찾을 수 없습니다.")
 
-    available_years = sorted(df["year"].dropna().astype(int).unique().tolist())
+    candidate_dates = _generate_candidate_dates(parsed_request)
 
-    for date_candidate in date_candidates:
-        departure_date = date_candidate["departure_date"]
-        return_date = date_candidate["return_date"]
-        target_year = pd.to_datetime(departure_date).year
+    if not candidate_dates:
+        raise ValueError("입력 조건에 맞는 여행 날짜 조합을 만들 수 없습니다.")
 
-        if target_year in available_years:
-            analysis_year = target_year
-        else:
-            past_years = [year for year in available_years if year <= target_year]
-            analysis_year = max(past_years) if past_years else max(available_years)
+    trip_days = _safe_int(parsed_request.get("trip_days"), 4)
+    recommendations = []
 
-        for arrival_airport in arrival_airports:
-            try:
-                matched_feature = find_route_feature(
-                    df=df,
-                    departure_airport=departure_airport,
-                    arrival_airport=arrival_airport,
-                    departure_date=departure_date,
-                    year=analysis_year,
-                )
+    for _, route_row in candidate_routes.iterrows():
+        departure_airport = route_row.get("departure_airport")
+        arrival_airport = route_row.get("arrival_airport")
 
-                sample_input = build_sample_input(
-                    matched_feature=matched_feature,
-                    departure_date=departure_date,
-                )
+        best_route_item = None
 
-                risk_result = run_agent_pipeline(sample_input)
+        for date_candidate in candidate_dates:
+            departure_date = date_candidate["departure_date"]
+            return_date = date_candidate["return_date"]
+            required_date_match_count = _safe_int(
+                date_candidate.get("required_date_match_count"),
+                0,
+            )
 
-                results.append(
-                    {
-                        "departure_airport": risk_result.get("departure_airport"),
-                        "arrival_airport": risk_result.get("arrival_airport"),
-                        "departure_date": departure_date,
-                        "return_date": return_date,
-                        "risk_level": risk_result.get("risk_level"),
-                        "risk_score": risk_result.get("risk_score"),
-                        "purchase_timing_recommendation": risk_result.get(
-                            "purchase_timing_recommendation"
-                        ),
-                        "decision_reason": risk_result.get("decision_reason"),
-                        "required_include_dates": parsed_request.get("must_include_dates") or [],
-                        "risk_result": risk_result,
-                        "matched_feature": matched_feature,
-                    }
-                )
+            route_feature = find_route_feature(
+                df=df,
+                departure_airport=departure_airport,
+                arrival_airport=arrival_airport,
+                departure_date=departure_date,
+            )
 
-            except Exception:
+            sample_input = _build_sample_input(
+                matched_feature=route_feature,
+                departure_date=departure_date,
+                return_date=return_date,
+                parsed_request=parsed_request,
+            )
+
+            risk_result = run_agent_pipeline(sample_input)
+
+            item = _build_recommendation_item(
+                route_feature=route_feature,
+                risk_result=risk_result,
+                departure_date=departure_date,
+                return_date=return_date,
+                trip_days=trip_days,
+                required_date_match_count=required_date_match_count,
+            )
+
+            if best_route_item is None:
+                best_route_item = item
                 continue
 
-    if not results:
-        raise ValueError("조건에 맞는 추천 후보를 만들 수 없습니다.")
+            if _is_better_recommendation(
+                candidate_item=item,
+                current_best_item=best_route_item,
+            ):
+                best_route_item = item
 
-    return _select_diverse_recommendations(
-        results=results,
-        recommendation_count=recommendation_count,
+        if best_route_item:
+            recommendations.append(best_route_item)
+
+    recommendations = sorted(
+        recommendations,
+        key=lambda item: (
+            item.get("risk_score") or 0,
+            item.get("required_date_match_count") or 0,
+        ),
+        reverse=True,
     )
+
+    for index, item in enumerate(recommendations, start=1):
+        item["rank"] = index
+        item["recommendation_rank"] = index
+
+    return recommendations[:recommendation_count]

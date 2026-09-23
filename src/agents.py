@@ -1,339 +1,307 @@
-from typing import Dict, Any, List
-from src.validators import validate_agent_input
+from datetime import datetime
+from typing import Dict, Any, Optional
 
 
-def safe_float(value, default: float = 0.0) -> float:
+MAX_SCORE = 100
+
+WEIGHTS = {
+    "demand_pressure": 35,
+    "supply_constraint": 25,
+    "competition_pressure": 20,
+    "schedule_pressure": 15,
+    "exchange_pressure": 5,
+}
+
+LEGACY_SCORE_COLUMNS = [
+    "demand_pressure_score",
+    "supply_pressure_score",
+    "exchange_pressure_score",
+    "competition_pressure_score",
+    "holiday_pressure_score",
+]
+
+
+def _safe_float(value, default=0.0):
     try:
         if value is None:
             return default
 
-        value = str(value).replace(",", "").strip()
+        value = float(value)
 
-        if value == "" or value.lower() == "nan":
+        if value != value:
             return default
 
-        return float(value)
+        if value in [float("inf"), float("-inf")]:
+            return default
+
+        return value
+
     except Exception:
         return default
 
 
-def safe_str(value, default: str = "") -> str:
+def _clip(value, min_value=0.0, max_value=1.0):
+    value = _safe_float(value, 0.0)
+    return max(min_value, min(max_value, value))
+
+
+def _remove_legacy_score_columns(sample_input: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in sample_input.items()
+        if key not in LEGACY_SCORE_COLUMNS
+    }
+
+
+def _parse_date(value: Any) -> Optional[datetime]:
     if value is None:
-        return default
+        return None
 
-    value = str(value).strip()
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d")
 
-    if value.lower() == "nan":
-        return default
-
-    return value
+    except Exception:
+        return None
 
 
-def score_demand_supply_gap(passenger_growth_rate: float, flight_growth_rate: float) -> Dict[str, Any]:
+def _as_list(value: Any):
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, tuple):
+        return list(value)
+
+    if isinstance(value, set):
+        return list(value)
+
+    return [value]
+
+
+def _count_required_dates_in_trip(
+    departure_date: Any,
+    return_date: Any,
+    required_dates: Any,
+) -> int:
+    start_date = _parse_date(departure_date)
+    end_date = _parse_date(return_date)
+
+    if start_date is None:
+        return 0
+
+    if end_date is None:
+        end_date = start_date
+
+    if end_date < start_date:
+        end_date = start_date
+
+    count = 0
+
+    for value in _as_list(required_dates):
+        parsed_required_date = _parse_date(value)
+
+        if parsed_required_date and start_date <= parsed_required_date <= end_date:
+            count += 1
+
+    return count
+
+
+def calculate_schedule_pressure(sample_input: Dict[str, Any]) -> float:
     """
-    수요-공급 불균형 점수.
-    단순히 여객이 전년 대비 증가했다는 이유만으로 수요가 강하다고 보지 않는다.
-    핵심은 여객 증가율이 운항편 증가율보다 얼마나 빠른지이다.
-    """
-    gap = passenger_growth_rate - flight_growth_rate
+    사용자 여행일 기준 일정 압력.
 
-    if gap >= 30:
-        score = 35
-        reason = (
-            "여객 증가율이 운항편 증가율보다 30%p 이상 높아 "
-            "수요가 공급 확대 속도보다 빠르게 증가한 것으로 판단됩니다."
+    기존 방식:
+    - 공휴일이 하루라도 겹치면 15점 전체 반영
+
+    개선 방식:
+    - 공휴일 포함 일수 / 전체 필수 공휴일 일수 비율로 반영
+    - 예: 추석 3일 중 1일 포함 → 1/3 * 15점
+    - 예: 추석 3일 중 3일 포함 → 3/3 * 15점
+    """
+
+    required_dates = (
+        sample_input.get("required_include_dates")
+        or sample_input.get("must_include_dates")
+        or []
+    )
+
+    departure_date = sample_input.get("departure_date")
+    return_date = sample_input.get("return_date") or sample_input.get("arrival_date")
+
+    required_dates = _as_list(required_dates)
+
+    if required_dates:
+        matched_count = _count_required_dates_in_trip(
+            departure_date=departure_date,
+            return_date=return_date,
+            required_dates=required_dates,
         )
-    elif gap >= 15:
-        score = 28
-        reason = (
-            "여객 증가율이 운항편 증가율보다 15%p 이상 높아 "
-            "수요-공급 불균형 가능성이 있습니다."
-        )
-    elif gap >= 5:
-        score = 20
-        reason = (
-            "여객 증가율이 운항편 증가율보다 소폭 높아 "
-            "일부 수요 압력이 존재합니다."
-        )
-    elif gap >= -5:
-        score = 12
-        reason = (
-            "여객 증가율과 운항편 증가율이 유사해 "
-            "수요와 공급이 비교적 균형적인 상태로 판단됩니다."
-        )
-    else:
-        score = 5
-        reason = (
-            "운항편 증가율이 여객 증가율보다 높아 "
-            "공급 측면의 여유가 있는 것으로 판단됩니다."
-        )
+
+        total_required_count = len(required_dates)
+
+        if total_required_count <= 0:
+            return 0.0
+
+        return _clip(matched_count / total_required_count, 0.0, 1.0)
+
+    holiday_count = _safe_float(sample_input.get("holiday_count"), 0.0)
+    holiday_name = str(sample_input.get("holiday_name") or "").strip()
+    must_include_holiday_names = sample_input.get("must_include_holiday_names") or []
+
+    if holiday_count > 0:
+        return 1.0
+
+    if must_include_holiday_names:
+        return 1.0
+
+    if holiday_name and holiday_name.lower() not in ["nan", "none", ""]:
+        return 1.0
+
+    return 0.0
+
+
+def calculate_factor_scores(sample_input: Dict[str, Any]) -> Dict[str, float]:
+    demand_pressure = _clip(
+        sample_input.get("normalized_demand_pressure"),
+        0.0,
+        1.0,
+    )
+    supply_constraint = _clip(
+        sample_input.get("normalized_supply_constraint"),
+        0.0,
+        1.0,
+    )
+    competition_pressure = _clip(
+        sample_input.get("normalized_competition_pressure"),
+        0.0,
+        1.0,
+    )
+    exchange_pressure = _clip(
+        sample_input.get("normalized_exchange_pressure"),
+        0.0,
+        1.0,
+    )
+    schedule_pressure = calculate_schedule_pressure(sample_input)
 
     return {
-        "factor": "demand_supply_gap",
-        "score": score,
-        "max_score": 35,
-        "passenger_growth_rate": passenger_growth_rate,
-        "flight_growth_rate": flight_growth_rate,
-        "gap": gap,
-        "reason": reason,
+        "demand_pressure_score": round(
+            demand_pressure * WEIGHTS["demand_pressure"],
+            1,
+        ),
+        "supply_constraint_score": round(
+            supply_constraint * WEIGHTS["supply_constraint"],
+            1,
+        ),
+        "competition_pressure_score": round(
+            competition_pressure * WEIGHTS["competition_pressure"],
+            1,
+        ),
+        "schedule_pressure_score": round(
+            schedule_pressure * WEIGHTS["schedule_pressure"],
+            1,
+        ),
+        "exchange_pressure_score": round(
+            exchange_pressure * WEIGHTS["exchange_pressure"],
+            1,
+        ),
     }
 
 
-def score_supply(flight_growth_rate: float) -> Dict[str, Any]:
-    """
-    운항 공급 점수.
-    운항편 수가 감소하거나 정체될수록 공급 부족 위험이 높다고 판단.
-    """
-    if flight_growth_rate <= -10:
-        score = 25
-        reason = "운항편 수가 10% 이상 감소하여 공급 축소 압력이 큽니다."
-    elif flight_growth_rate <= 0:
-        score = 20
-        reason = "운항편 수가 전년 대비 감소 또는 정체되어 공급 여력이 제한적입니다."
-    elif flight_growth_rate <= 10:
-        score = 14
-        reason = "운항편 수 증가율이 낮아 수요 증가를 충분히 흡수하지 못할 수 있습니다."
-    elif flight_growth_rate <= 25:
-        score = 8
-        reason = "운항편 수가 일정 수준 증가하여 공급 부담은 보통 수준입니다."
-    else:
-        score = 3
-        reason = "운항편 수 증가율이 높아 공급 확대 여력이 있습니다."
+def calculate_risk_score(factor_scores: Dict[str, float]) -> float:
+    return round(sum(factor_scores.values()), 1)
 
-    return {
-        "factor": "supply",
-        "score": score,
-        "max_score": 25,
-        "value": flight_growth_rate,
-        "reason": reason,
+
+def classify_risk_level(risk_score: float) -> str:
+    if risk_score >= 60:
+        return "높음"
+
+    if risk_score >= 40:
+        return "중간"
+
+    return "낮음"
+
+
+def recommend_purchase_timing(risk_level: str) -> str:
+    if risk_level == "높음":
+        return "빠른 구매 검토"
+
+    if risk_level == "중간":
+        return "가격 모니터링 후 구매"
+
+    return "대기 가능"
+
+
+def build_decision_reason(
+    risk_score: float,
+    risk_level: str,
+    factor_scores: Dict[str, float],
+) -> str:
+    sorted_factors = sorted(
+        factor_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    top_factors = [
+        name
+        for name, score in sorted_factors
+        if score > 0
+    ][:3]
+
+    factor_name_map = {
+        "demand_pressure_score": "수요 압력",
+        "supply_constraint_score": "공급 제약",
+        "competition_pressure_score": "경쟁도 압력",
+        "schedule_pressure_score": "일정/공휴일 압력",
+        "exchange_pressure_score": "환율 압력",
     }
 
-
-def score_competition(avg_carrier_count: float, avg_lcc_share: float) -> Dict[str, Any]:
-    """
-    경쟁도 점수.
-    운항 항공사 수가 적을수록 가격 상승 압력이 커질 수 있다.
-    LCC 비중이 높으면 가격 상승 압력을 일부 완화한다.
-    """
-    if avg_carrier_count <= 2:
-        base_score = 20
-        reason = "운항 항공사 수가 적어 노선 경쟁도가 낮습니다."
-    elif avg_carrier_count <= 4:
-        base_score = 16
-        reason = "운항 항공사 수가 제한적이어서 경쟁 압력이 크지 않습니다."
-    elif avg_carrier_count <= 6:
-        base_score = 11
-        reason = "운항 항공사 수가 보통 수준입니다."
-    elif avg_carrier_count <= 8:
-        base_score = 7
-        reason = "운항 항공사 수가 비교적 많아 경쟁 완화 요인이 있습니다."
-    else:
-        base_score = 3
-        reason = "운항 항공사 수가 많아 경쟁 압력이 충분합니다."
-
-    if avg_lcc_share >= 0.5:
-        score = max(base_score - 4, 1)
-        reason += " 또한 LCC 비중이 높아 가격 상승 압력은 일부 완화됩니다."
-    elif avg_lcc_share >= 0.3:
-        score = max(base_score - 2, 1)
-        reason += " LCC 비중이 일부 존재해 경쟁 완화 요인이 있습니다."
-    else:
-        score = base_score
-
-    return {
-        "factor": "competition",
-        "score": score,
-        "max_score": 20,
-        "carrier_count": avg_carrier_count,
-        "lcc_share": avg_lcc_share,
-        "reason": reason,
-    }
-
-
-def score_holiday(days_to_holiday: float, holiday_count: float, holiday_name: str) -> Dict[str, Any]:
-    """
-    공휴일/연휴 점수.
-    출발일이 연휴와 가까울수록 여행 수요가 증가할 가능성을 반영.
-    현재 MVP에서는 days_to_holiday가 없을 경우 연도별 공휴일 수를 보조 기준으로 사용.
-    """
-    holiday_name = safe_str(holiday_name)
-
-    if holiday_name and days_to_holiday > 0:
-        if days_to_holiday <= 7:
-            score = 15
-            reason = f"출발일이 공휴일 또는 연휴와 7일 이내로 가깝습니다. 관련 공휴일: {holiday_name}"
-        elif days_to_holiday <= 14:
-            score = 12
-            reason = f"출발일이 공휴일 또는 연휴와 14일 이내입니다. 관련 공휴일: {holiday_name}"
-        elif days_to_holiday <= 30:
-            score = 8
-            reason = f"출발일이 공휴일과 한 달 이내입니다. 관련 공휴일: {holiday_name}"
-        else:
-            score = 4
-            reason = "출발일과 공휴일 간 거리가 있어 연휴 영향은 제한적입니다."
-    else:
-        if holiday_count >= 15:
-            score = 10
-            reason = "해당 연도 공휴일 수가 많아 여행 수요 보조 요인이 있습니다."
-        elif holiday_count >= 10:
-            score = 6
-            reason = "해당 연도 공휴일 수가 보통 수준입니다."
-        else:
-            score = 3
-            reason = "공휴일 요인으로 인한 추가 수요 압력은 낮습니다."
-
-    return {
-        "factor": "holiday",
-        "score": score,
-        "max_score": 15,
-        "days_to_holiday": days_to_holiday,
-        "holiday_count": holiday_count,
-        "holiday_name": holiday_name,
-        "reason": reason,
-    }
-
-
-def score_exchange(jpy_krw_change_rate: float) -> Dict[str, Any]:
-    """
-    환율 점수.
-    환율은 항공권 가격 상승을 직접 결정하는 변수가 아니므로 낮은 가중치로 반영.
-    """
-    if jpy_krw_change_rate >= 5:
-        score = 5
-        reason = "JPY/KRW 환율 상승률이 높아 여행 비용 부담 요인으로 일부 반영됩니다."
-    elif jpy_krw_change_rate >= 2:
-        score = 4
-        reason = "JPY/KRW 환율이 상승세이나 가격 상승 위험도에는 낮은 가중치로 반영됩니다."
-    elif jpy_krw_change_rate >= 0:
-        score = 3
-        reason = "JPY/KRW 환율이 소폭 상승 또는 유지 수준입니다."
-    elif jpy_krw_change_rate >= -3:
-        score = 2
-        reason = "JPY/KRW 환율이 소폭 하락하여 환율 부담은 제한적입니다."
-    else:
-        score = 1
-        reason = "JPY/KRW 환율이 하락하여 환율 측면의 부담은 낮습니다."
-
-    return {
-        "factor": "exchange",
-        "score": score,
-        "max_score": 5,
-        "value": jpy_krw_change_rate,
-        "reason": reason,
-    }
-
-
-def classify_risk(total_score: int) -> Dict[str, str]:
-    if total_score >= 70:
-        return {
-            "risk_level": "높음",
-            "purchase_timing_recommendation": "빠른 구매 검토",
-            "decision_reason": "수요-공급 불균형, 공급 제약, 경쟁도, 연휴 요인 중 여러 항목에서 가격 상승 위험 신호가 나타났습니다.",
-        }
-
-    if total_score >= 45:
-        return {
-            "risk_level": "중간",
-            "purchase_timing_recommendation": "가격 모니터링 후 구매",
-            "decision_reason": "일부 가격 상승 요인이 있으나, 모든 지표가 강한 위험 신호를 보이는 것은 아닙니다.",
-        }
-
-    return {
-        "risk_level": "낮음",
-        "purchase_timing_recommendation": "대기 가능",
-        "decision_reason": "현재 데이터 기준 수요-공급 불균형과 경쟁도 측면의 가격 상승 압력이 제한적입니다.",
-    }
-
-
-def build_evidence(data: Dict[str, Any], factor_results: List[Dict[str, Any]]) -> List[str]:
-    evidence = []
-
-    passenger_growth_rate = safe_float(data.get("passenger_growth_rate"))
-    flight_growth_rate = safe_float(data.get("flight_growth_rate"))
-    gap = passenger_growth_rate - flight_growth_rate
-
-    evidence.append(f"노선: {safe_str(data.get('departure_airport'))} → {safe_str(data.get('arrival_airport'))}")
-    evidence.append(f"출발일: {safe_str(data.get('departure_date'))}")
-    evidence.append(f"여객 증가율: {passenger_growth_rate:.2f}%")
-    evidence.append(f"운항편 증가율: {flight_growth_rate:.2f}%")
-    evidence.append(f"수요-공급 증가율 차이: {gap:.2f}%p")
-
-    if "avg_carrier_count" in data:
-        evidence.append(f"평균 운항 항공사 수: {safe_float(data.get('avg_carrier_count')):.2f}개")
-
-    if "avg_lcc_share" in data:
-        evidence.append(f"LCC 비중: {safe_float(data.get('avg_lcc_share')):.2f}")
-
-    evidence.append(f"JPY/KRW 30일 변동률: {safe_float(data.get('jpy_krw_change_rate')):.2f}%")
-
-    if "holiday_count" in data:
-        evidence.append(f"연도별 공휴일 수: {safe_float(data.get('holiday_count')):.0f}일")
-
-    for item in factor_results:
-        evidence.append(item["reason"])
-
-    return evidence
-
-
-def run_agent_pipeline(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    공공데이터 기반 항공권 가격 상승 위험도 및 구매 타이밍 판단.
-    핵심 기준은 단순 여객 증가율이 아니라 수요-공급 불균형이다.
-    """
-    validate_agent_input(data)
-
-    passenger_growth_rate = safe_float(data.get("passenger_growth_rate"))
-    flight_growth_rate = safe_float(data.get("flight_growth_rate"))
-    jpy_krw_change_rate = safe_float(data.get("jpy_krw_change_rate"))
-
-    avg_carrier_count = safe_float(data.get("avg_carrier_count", data.get("carrier_count", 0)))
-    avg_lcc_share = safe_float(data.get("avg_lcc_share", data.get("lcc_share", 0)))
-
-    days_to_holiday = safe_float(data.get("days_to_holiday", 0))
-    holiday_count = safe_float(data.get("holiday_count", 0))
-    holiday_name = safe_str(data.get("holiday_name", data.get("holiday_names", "")))
-
-    demand_supply_gap_result = score_demand_supply_gap(passenger_growth_rate, flight_growth_rate)
-    supply_result = score_supply(flight_growth_rate)
-    competition_result = score_competition(avg_carrier_count, avg_lcc_share)
-    holiday_result = score_holiday(days_to_holiday, holiday_count, holiday_name)
-    exchange_result = score_exchange(jpy_krw_change_rate)
-
-    factor_results = [
-        demand_supply_gap_result,
-        supply_result,
-        competition_result,
-        holiday_result,
-        exchange_result,
+    readable_factors = [
+        factor_name_map.get(name, name)
+        for name in top_factors
     ]
 
-    total_score = sum(item["score"] for item in factor_results)
-    decision = classify_risk(total_score)
+    if readable_factors:
+        factor_text = ", ".join(readable_factors)
+    else:
+        factor_text = "주요 압력 요인 없음"
 
-    evidence = build_evidence(data, factor_results)
+    return (
+        f"정규화 기반 가격 상승 압력 점수는 {risk_score}점이며, "
+        f"위험도는 '{risk_level}'입니다. "
+        f"주요 영향 요인은 {factor_text}입니다."
+    )
+
+
+def run_agent_pipeline(sample_input: Dict[str, Any]) -> Dict[str, Any]:
+    clean_input = _remove_legacy_score_columns(sample_input)
+
+    factor_scores = calculate_factor_scores(clean_input)
+    risk_score = calculate_risk_score(factor_scores)
+    risk_level = classify_risk_level(risk_score)
+    purchase_timing_recommendation = recommend_purchase_timing(risk_level)
+
+    decision_reason = build_decision_reason(
+        risk_score=risk_score,
+        risk_level=risk_level,
+        factor_scores=factor_scores,
+    )
 
     result = {
-        "departure_airport": data.get("departure_airport"),
-        "arrival_airport": data.get("arrival_airport"),
-        "departure_date": data.get("departure_date"),
-        "route": data.get("route", f"{data.get('departure_airport')}-{data.get('arrival_airport')}"),
-        "risk_score": total_score,
-        "max_score": 100,
-        "risk_level": decision["risk_level"],
-        "purchase_timing_recommendation": decision["purchase_timing_recommendation"],
-        "decision_reason": decision["decision_reason"],
-        "factor_scores": {
-            "demand_supply_gap_score": demand_supply_gap_result["score"],
-            "supply_pressure_score": supply_result["score"],
-            "competition_pressure_score": competition_result["score"],
-            "holiday_pressure_score": holiday_result["score"],
-            "exchange_pressure_score": exchange_result["score"],
-        },
-        "factor_details": factor_results,
-        "evidence": evidence,
-        "summary": (
-            f"현재 데이터 기준 가격 상승 위험도는 '{decision['risk_level']}'입니다. "
-            f"권장 구매 타이밍은 '{decision['purchase_timing_recommendation']}'입니다."
+        **clean_input,
+        "risk_score": risk_score,
+        "max_score": MAX_SCORE,
+        "risk_level": risk_level,
+        "purchase_timing_recommendation": purchase_timing_recommendation,
+        "decision_reason": decision_reason,
+        "factor_scores": factor_scores,
+        "risk_method": "normalized_percentile_based_pressure_score",
+        "risk_score_description": (
+            "실제 항공권 가격 예측값이 아니라, 연도별 노선 분포 기준으로 정규화한 "
+            "수요·공급·경쟁도·일정·환율 기반 가격 상승 압력 지표입니다. "
+            "일정/공휴일 압력은 여행 기간에 포함된 주요 공휴일 일수 비율을 기준으로 반영합니다."
         ),
     }
 
