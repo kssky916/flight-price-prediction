@@ -1,195 +1,245 @@
 from pathlib import Path
 from typing import Optional
+
 import pandas as pd
 
-DATA_PATH = Path("data/processed/route_features_japan.csv")
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DATA_PATH = ROOT_DIR / "data" / "processed" / "route_features_japan.csv"
 
 
-def load_route_features() -> pd.DataFrame:
-    if not DATA_PATH.exists():
-        raise FileNotFoundError(
-            f"{DATA_PATH} 파일이 없습니다. 먼저 scripts/build_route_features.py를 실행하세요."
+def _normalize_airport_display(value):
+    if pd.isna(value):
+        return value
+
+    value = str(value).strip()
+
+    airport_map = {
+        "한국": "ICN",
+        "인천": "ICN",
+        "김포": "GMP",
+        "부산": "PUS",
+        "김해": "PUS",
+        "제주": "CJU",
+        "나리타": "NRT",
+        "하네다": "HND",
+        "간사이": "KIX",
+        "오사카": "KIX",
+        "후쿠오카": "FUK",
+        "삿포로": "CTS",
+        "오키나와": "OKA",
+        "나고야": "NGO",
+        "고베": "UKB",
+        "구마모토": "KMJ",
+        "구마모도": "KMJ",
+        "히로시마": "HIJ",
+        "마쓰야마": "MYJ",
+        "가고시마": "KOJ",
+        "오이타": "OIT",
+        "미야자키": "KMI",
+        "다카마쓰": "TAK",
+        "센다이": "SDJ",
+        "아오모리": "AOJ",
+        "시즈오카": "FSZ",
+        "니가타": "KIJ",
+        "오카야마": "OKJ",
+        "요나고": "YGJ",
+        "기타큐슈": "KKJ",
+        "이시가키": "ISG",
+        "나가사키": "NGS",
+    }
+
+    if value in airport_map:
+        return airport_map[value]
+
+    if "(" in value and ")" in value:
+        code = value.split("(")[-1].split(")")[0].strip()
+        if len(code) == 3:
+            return code
+
+    return value
+
+
+def _ensure_compatibility_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "year" not in df.columns:
+        if "departure_date" in df.columns:
+            df["year"] = pd.to_datetime(df["departure_date"], errors="coerce").dt.year
+        else:
+            raise ValueError(
+                "데이터에 year 컬럼이 없습니다. "
+                "data/processed/route_features_japan.csv 파일을 확인해야 합니다."
+            )
+
+    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+
+    if "departure_airport" not in df.columns:
+        if "origin" in df.columns:
+            df["departure_airport"] = df["origin"]
+        else:
+            df["departure_airport"] = "ICN"
+
+    if "arrival_airport" not in df.columns:
+        if "destination" in df.columns:
+            df["arrival_airport"] = df["destination"]
+        else:
+            df["arrival_airport"] = ""
+
+    df["departure_airport"] = df["departure_airport"].apply(_normalize_airport_display)
+    df["arrival_airport"] = df["arrival_airport"].apply(_normalize_airport_display)
+
+    if "departure_date" not in df.columns:
+        df["departure_date"] = df["year"].astype(str) + "-01-01"
+
+    if "route_name" not in df.columns:
+        df["route_name"] = (
+            df["departure_airport"].astype(str)
+            + "-"
+            + df["arrival_airport"].astype(str)
         )
 
-    df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    if "route" not in df.columns:
+        df["route"] = df["route_name"]
 
-    required_cols = [
-        "year",
-        "route",
-        "origin",
-        "destination",
-        "passenger_growth_rate",
-        "flight_growth_rate",
-        "passengers_per_flight",
-        "risk_score",
-        "risk_level",
-        "purchase_timing_recommendation",
-    ]
+    default_numeric_columns = {
+        "passenger_growth_rate": 0,
+        "flight_growth_rate": 0,
+        "cargo_growth_rate": 0,
+        "passengers_per_flight": 0,
+        "avg_carrier_count": 0,
+        "avg_lcc_share": 0,
+        "jpy_krw_rate": 0,
+        "jpy_krw_change_rate": 0,
+        "jpy_krw_change_rate_30d": 0,
+        "holiday_count": 0,
+        "days_to_holiday": 0,
+        "delay_rate": 0,
+        "cancel_count": 0,
+        "risk_score": 0,
+    }
 
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    for col, default_value in default_numeric_columns.items():
+        if col not in df.columns:
+            df[col] = default_value
 
-    if missing_cols:
-        raise ValueError(f"route_features_japan.csv 누락 컬럼: {missing_cols}")
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_value)
 
-    # 기존 app.py 호환용 컬럼 생성
-    df["departure_airport"] = df["origin"]
-    df["arrival_airport"] = df["destination"]
-    df["departure_date"] = df["year"].astype(str) + "-01-01"
-
-    # 기존 app.py가 사용할 수 있는 별칭 컬럼
-    df["route_name"] = df["route"]
-    df["recommendation"] = df["purchase_timing_recommendation"]
-
-    # 혹시 app.py에서 기대하는 기본 컬럼이 없을 경우 대비
-    if "delay_rate" not in df.columns:
-        df["delay_rate"] = 0
-
-    if "cancel_count" not in df.columns:
-        df["cancel_count"] = 0
-
-    if "days_to_holiday" not in df.columns:
-        df["days_to_holiday"] = 0
+    if "jpy_krw_change_rate" in df.columns and "jpy_krw_change_rate_30d" in df.columns:
+        df["jpy_krw_change_rate"] = df["jpy_krw_change_rate_30d"].fillna(
+            df["jpy_krw_change_rate"]
+        )
 
     if "holiday_name" not in df.columns:
-        df["holiday_name"] = df.get("holiday_names", "")
-
-    if "jpy_krw_change_rate" not in df.columns:
-        if "jpy_krw_change_rate_30d" in df.columns:
-            df["jpy_krw_change_rate"] = df["jpy_krw_change_rate_30d"]
+        if "holiday_names" in df.columns:
+            df["holiday_name"] = df["holiday_names"].fillna("")
         else:
-            df["jpy_krw_change_rate"] = 0
+            df["holiday_name"] = ""
+
+    if "risk_level" not in df.columns:
+        df["risk_level"] = df["risk_score"].apply(_classify_risk_level)
+
+    if "purchase_timing_recommendation" not in df.columns:
+        df["purchase_timing_recommendation"] = df["risk_level"].apply(
+            _recommend_purchase_timing
+        )
+
+    if "recommendation" not in df.columns:
+        df["recommendation"] = df["purchase_timing_recommendation"]
 
     return df
 
 
-def get_available_routes() -> list:
-    df = load_route_features()
+def _classify_risk_level(score):
+    try:
+        score = float(score)
+    except Exception:
+        score = 0
 
-    routes = (
-        df[["route", "origin", "destination"]]
-        .drop_duplicates()
-        .sort_values("route")
-    )
-
-    return routes.to_dict("records")
-
-
-def get_available_years() -> list:
-    df = load_route_features()
-
-    years = sorted(df["year"].dropna().astype(int).unique().tolist())
-
-    return years
+    if score >= 70:
+        return "높음"
+    if score >= 45:
+        return "중간"
+    return "낮음"
 
 
-def get_route_feature(route: str, year: Optional[int] = None) -> dict:
-    df = load_route_features()
-
-    route_df = df[df["route"] == route].copy()
-
-    if route_df.empty:
-        available_routes = df["route"].drop_duplicates().head(20).tolist()
-        raise ValueError(
-            f"선택한 노선을 찾을 수 없습니다: {route}. "
-            f"사용 가능한 예시 노선: {available_routes}"
-        )
-
-    if year is not None:
-        matched = route_df[route_df["year"] == int(year)].copy()
-
-        if matched.empty:
-            matched = route_df.sort_values("year").tail(1).copy()
-        else:
-            matched = matched.sort_values("year").tail(1).copy()
-    else:
-        matched = route_df.sort_values("year").tail(1).copy()
-
-    return matched.iloc[0].to_dict()
+def _recommend_purchase_timing(risk_level):
+    if risk_level == "높음":
+        return "빠른 구매 검토"
+    if risk_level == "중간":
+        return "가격 모니터링 후 구매"
+    return "대기 가능"
 
 
-def get_route_history(route: str) -> pd.DataFrame:
-    df = load_route_features()
-
-    route_df = df[df["route"] == route].copy()
-
-    if route_df.empty:
-        raise ValueError(f"선택한 노선을 찾을 수 없습니다: {route}")
-
-    return route_df.sort_values("year").reset_index(drop=True)
-
-
-def get_top_risk_routes(year: Optional[int] = None, limit: int = 10) -> pd.DataFrame:
-    df = load_route_features()
-
-    if year is not None:
-        df = df[df["year"] == int(year)].copy()
-
-    if df.empty:
-        return df
-
-    return (
-        df.sort_values(["risk_score", "passenger_growth_rate"], ascending=[False, False])
-        .head(limit)
-        .reset_index(drop=True)
-    )
-
-
-# 기존 app.py 호환용 함수
 def load_sample_route_features() -> pd.DataFrame:
-    return load_route_features()
+    if not DATA_PATH.exists():
+        raise FileNotFoundError(f"최종 피처 파일을 찾을 수 없습니다: {DATA_PATH}")
+
+    df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    df = _ensure_compatibility_columns(df)
+
+    return df
 
 
 def find_route_feature(
     df: pd.DataFrame,
-    departure_airport: str = None,
-    arrival_airport: str = None,
-    departure_date: str = None,
-    route: str = None,
-    year=None,
-) -> dict:
-    data = df.copy()
+    departure_airport: str,
+    arrival_airport: str,
+    departure_date: Optional[str] = None,
+    year: Optional[int] = None,
+):
+    df = _ensure_compatibility_columns(df)
 
-    if route is None:
-        if departure_airport is None or arrival_airport is None:
-            raise ValueError("route 또는 departure_airport/arrival_airport가 필요합니다.")
+    departure_airport = _normalize_airport_display(departure_airport)
+    arrival_airport = _normalize_airport_display(arrival_airport)
 
-        matched = data[
-            (data["departure_airport"] == departure_airport)
-            & (data["arrival_airport"] == arrival_airport)
-        ].copy()
-    else:
-        matched = data[data["route"] == route].copy()
+    matched = df[
+        (df["departure_airport"].astype(str) == str(departure_airport))
+        & (df["arrival_airport"].astype(str) == str(arrival_airport))
+    ].copy()
 
     if matched.empty:
-        available_routes = (
-            data[["departure_airport", "arrival_airport", "route"]]
-            .drop_duplicates()
-            .head(20)
-            .to_dict("records")
-        )
         raise ValueError(
-            f"선택한 노선을 찾을 수 없습니다. "
-            f"departure_airport={departure_airport}, arrival_airport={arrival_airport}, route={route}. "
-            f"사용 가능한 예시: {available_routes}"
+            f"선택한 노선 데이터를 찾을 수 없습니다: {departure_airport} → {arrival_airport}"
         )
 
-    # departure_date가 들어오면 해당 연도 기준으로 매칭
-    if departure_date is not None:
-        parsed_date = pd.to_datetime(departure_date, errors="coerce")
-
-        if pd.notna(parsed_date):
-            target_year = int(parsed_date.year)
-            year_matched = matched[matched["year"] == target_year].copy()
-
-            if not year_matched.empty:
-                matched = year_matched
+    if year is None and departure_date is not None:
+        year = pd.to_datetime(departure_date).year
 
     if year is not None:
-        year_matched = matched[matched["year"] == int(year)].copy()
+        year = int(year)
 
-        if not year_matched.empty:
-            matched = year_matched
+        exact_year = matched[matched["year"].astype(int) == year]
 
-    matched = matched.sort_values("year").tail(1)
+        if not exact_year.empty:
+            matched = exact_year
+        else:
+            past_years = matched[matched["year"].astype(int) <= year]
+
+            if not past_years.empty:
+                latest_year = past_years["year"].max()
+                matched = past_years[past_years["year"] == latest_year]
+            else:
+                latest_year = matched["year"].max()
+                matched = matched[matched["year"] == latest_year]
+
+    matched = matched.sort_values("year", ascending=False)
 
     return matched.iloc[0].to_dict()
+
+
+def get_top_risk_routes(year: Optional[int] = None, limit: int = 10) -> pd.DataFrame:
+    df = load_sample_route_features()
+
+    if year is not None:
+        year_df = df[df["year"].astype(int) == int(year)]
+
+        if not year_df.empty:
+            df = year_df
+
+    return (
+        df.sort_values("risk_score", ascending=False)
+        .drop_duplicates(subset=["departure_airport", "arrival_airport"])
+        .head(limit)
+        .copy()
+    )

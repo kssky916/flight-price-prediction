@@ -1,10 +1,13 @@
 from datetime import datetime
+import re
 
 SUPPORTED_AIRPORTS = {
     "ICN": "인천",
     "GMP": "김포",
     "PUS": "김해",
     "CJU": "제주",
+
+    # 일본 주요 공항
     "NRT": "도쿄 나리타",
     "HND": "도쿄 하네다",
     "KIX": "오사카 간사이",
@@ -12,6 +15,67 @@ SUPPORTED_AIRPORTS = {
     "CTS": "삿포로",
     "OKA": "오키나와",
     "NGO": "나고야",
+    "UKB": "고베",
+    "KMJ": "구마모토",
+    "HIJ": "히로시마",
+    "MYJ": "마쓰야마",
+    "KOJ": "가고시마",
+    "OIT": "오이타",
+    "KMI": "미야자키",
+    "TAK": "다카마쓰",
+    "SDJ": "센다이",
+    "AOJ": "아오모리",
+    "FSZ": "시즈오카",
+    "KIJ": "니가타",
+    "OKJ": "오카야마",
+    "YGJ": "요나고",
+    "KKJ": "기타큐슈",
+    "ISG": "이시가키",
+    "NGS": "나가사키",
+}
+
+
+AIRPORT_NAME_TO_CODE = {
+    "한국": "ICN",
+    "인천": "ICN",
+    "인천국제공항": "ICN",
+    "김포": "GMP",
+    "김해": "PUS",
+    "부산": "PUS",
+    "제주": "CJU",
+
+    "도쿄": "NRT",
+    "나리타": "NRT",
+    "도쿄 나리타": "NRT",
+    "하네다": "HND",
+    "도쿄 하네다": "HND",
+    "오사카": "KIX",
+    "간사이": "KIX",
+    "오사카 간사이": "KIX",
+    "후쿠오카": "FUK",
+    "삿포로": "CTS",
+    "오키나와": "OKA",
+    "나고야": "NGO",
+    "고베": "UKB",
+    "구마모토": "KMJ",
+    "구마모도": "KMJ",
+    "히로시마": "HIJ",
+    "마쓰야마": "MYJ",
+    "마츠야마": "MYJ",
+    "가고시마": "KOJ",
+    "오이타": "OIT",
+    "미야자키": "KMI",
+    "다카마쓰": "TAK",
+    "다카마츠": "TAK",
+    "센다이": "SDJ",
+    "아오모리": "AOJ",
+    "시즈오카": "FSZ",
+    "니가타": "KIJ",
+    "오카야마": "OKJ",
+    "요나고": "YGJ",
+    "기타큐슈": "KKJ",
+    "이시가키": "ISG",
+    "나가사키": "NGS",
 }
 
 
@@ -21,41 +85,27 @@ def normalize_airport_code(value):
 
     value = str(value).strip()
 
-    mapping = {
-        "인천(ICN)": "ICN",
-        "인천": "ICN",
-        "ICN": "ICN",
-        "김포(GMP)": "GMP",
-        "김포": "GMP",
-        "GMP": "GMP",
-        "김해(PUS)": "PUS",
-        "부산(PUS)": "PUS",
-        "부산": "PUS",
-        "PUS": "PUS",
-        "제주(CJU)": "CJU",
-        "제주": "CJU",
-        "CJU": "CJU",
-        "나리타(NRT)": "NRT",
-        "도쿄 나리타(NRT)": "NRT",
-        "NRT": "NRT",
-        "하네다(HND)": "HND",
-        "도쿄 하네다(HND)": "HND",
-        "HND": "HND",
-        "간사이(KIX)": "KIX",
-        "오사카(KIX)": "KIX",
-        "오사카 간사이(KIX)": "KIX",
-        "KIX": "KIX",
-        "후쿠오카(FUK)": "FUK",
-        "FUK": "FUK",
-        "삿포로(CTS)": "CTS",
-        "CTS": "CTS",
-        "오키나와(OKA)": "OKA",
-        "OKA": "OKA",
-        "나고야(NGO)": "NGO",
-        "NGO": "NGO",
-    }
+    # 이미 IATA 코드면 그대로 사용
+    if value in SUPPORTED_AIRPORTS:
+        return value
 
-    return mapping.get(value, value)
+    # 예: 고베(UKB), 인천(ICN), 오사카 간사이(KIX)
+    match = re.search(r"\(([A-Z]{3})\)", value)
+    if match:
+        code = match.group(1)
+        if code in SUPPORTED_AIRPORTS:
+            return code
+
+    # 괄호 제거 후 이름 매칭
+    name_only = re.sub(r"\([A-Z]{3}\)", "", value).strip()
+
+    if name_only in AIRPORT_NAME_TO_CODE:
+        return AIRPORT_NAME_TO_CODE[name_only]
+
+    if value in AIRPORT_NAME_TO_CODE:
+        return AIRPORT_NAME_TO_CODE[value]
+
+    return value
 
 
 def validate_agent_input(data: dict) -> None:

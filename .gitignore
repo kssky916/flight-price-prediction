@@ -1,6 +1,6 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 
@@ -15,17 +15,18 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
-# Output files
+# Outputs
 outputs/
 
-# OS files
+# OS
 .DS_Store
 
 # Jupyter
-.ipynb_checkpoints/data/raw/
+.ipynb_checkpoints/
 
-# Raw data
+# Local database / raw data
+DB/
 data/raw/
 
-# Raw data
-data/raw/
+# Local test only
+scripts/test_openai_api.py
