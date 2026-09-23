@@ -116,3 +116,122 @@ data/processed/ 정제 파일 생성
 route_features_japan.csv 생성
 ↓
 Streamlit 앱에서 분석 실행
+
+
+## Backend API 구조
+
+본 프로젝트는 초기 Streamlit 단일 앱 구조에서 FastAPI 기반 백엔드 API를 추가하여, 화면 UI와 분석 로직 호출 구조를 분리했습니다.
+
+### 실행 방법
+
+백엔드 API 서버 실행:
+
+```bash
+./scripts/run_backend.sh
+```
+
+Streamlit UI 실행:
+
+```bash
+./scripts/run_frontend.sh
+```
+
+API 문서 확인:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### 주요 API
+
+#### Health Check
+
+```http
+GET /health
+```
+
+FastAPI 서버 실행 상태를 확인합니다.
+
+#### 노선별 위험도 분석
+
+```http
+POST /analyze/route
+```
+
+입력 예시:
+
+```json
+{
+  "departure_airport": "ICN",
+  "arrival_airport": "NRT",
+  "departure_date": "2027-09-13",
+  "arrival_date": "2027-09-16"
+}
+```
+
+기능:
+
+- 출발지, 도착지, 출발일, 도착일을 입력받습니다.
+- 노선별 수요, 공급, 경쟁도, 공휴일, 환율 데이터를 기반으로 가격 상승 위험도를 산정합니다.
+- 위험도 점수, 구매 판단, AI 설명을 JSON 형식으로 반환합니다.
+
+#### 텍스트 기반 여행 조건 추천
+
+```http
+POST /recommend/text
+```
+
+입력 예시:
+
+```json
+{
+  "text": "내년 추석 일본여행 갈거야 3박4일로 추천좀",
+  "recommendation_count": 5
+}
+```
+
+기능:
+
+- 사용자의 텍스트 입력에서 여행 조건을 추출합니다.
+- 체류 기간, 목적지, 공휴일 포함 조건을 반영해 가능한 여행 일정을 생성합니다.
+- 조건에 맞는 추천 노선과 구매 타이밍 판단 결과를 반환합니다.
+
+### 구조 변경 요약
+
+기존 구조:
+
+```text
+Streamlit app.py
+→ 사용자 입력
+→ 분석 로직 직접 호출
+→ 결과 출력
+```
+
+변경 후 구조:
+
+```text
+Streamlit app.py
+→ FastAPI API 요청
+→ src 분석 로직 실행
+→ JSON 응답 반환
+→ Streamlit 결과 출력
+```
+
+### 주요 변경 파일
+
+```text
+api/main.py
+→ FastAPI 백엔드 API 서버
+
+src/api_client.py
+→ Streamlit에서 FastAPI를 호출하는 클라이언트
+
+app.py
+→ 직접 분석 로직 호출 방식에서 API 호출 방식으로 변경
+
+scripts/run_backend.sh
+→ FastAPI 백엔드 실행 스크립트
+
+scripts/run_frontend.sh
+→ Streamlit UI 실행 스크립트
+```

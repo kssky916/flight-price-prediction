@@ -1,19 +1,12 @@
-from pathlib import Path
 from datetime import timedelta
 import time
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import streamlit.components.v1 as components
 
-from src.data_loader import (
-    load_sample_route_features,
-    find_route_feature,
-)
-from src.agents import run_agent_pipeline
-from src.response_generator import generate_purchase_timing_report
-from src.llm_client import parse_travel_request
-from src.travel_recommender import recommend_routes_from_request, complete_parsed_request
+from src.data_loader import load_sample_route_features
+from src.api_client import analyze_route_via_api, recommend_text_via_api
 
 
 st.set_page_config(
@@ -55,57 +48,19 @@ AIRPORT_DISPLAY_NAMES = {
 }
 
 
-HOLIDAY_PATH = Path("data/processed/processed_holidays_clean.csv")
-
-
 def display_airport(value):
     value = str(value).strip()
 
     if "(" in value and ")" in value:
         code = value.split("(")[-1].split(")")[0].strip()
+
         if code in AIRPORT_DISPLAY_NAMES:
             return AIRPORT_DISPLAY_NAMES[code]
 
     if value in AIRPORT_DISPLAY_NAMES:
         return AIRPORT_DISPLAY_NAMES[value]
 
-    name_map = {
-        "한국": "인천(ICN)",
-        "인천": "인천(ICN)",
-        "김포": "김포(GMP)",
-        "부산": "부산/김해(PUS)",
-        "김해": "부산/김해(PUS)",
-        "제주": "제주(CJU)",
-        "도쿄": "도쿄 나리타(NRT)",
-        "나리타": "도쿄 나리타(NRT)",
-        "하네다": "도쿄 하네다(HND)",
-        "오사카": "오사카 간사이(KIX)",
-        "간사이": "오사카 간사이(KIX)",
-        "후쿠오카": "후쿠오카(FUK)",
-        "삿포로": "삿포로(CTS)",
-        "오키나와": "오키나와(OKA)",
-        "나고야": "나고야(NGO)",
-        "고베": "고베(UKB)",
-        "구마모토": "구마모토(KMJ)",
-        "구마모도": "구마모토(KMJ)",
-        "히로시마": "히로시마(HIJ)",
-        "마쓰야마": "마쓰야마(MYJ)",
-        "가고시마": "가고시마(KOJ)",
-        "오이타": "오이타(OIT)",
-        "미야자키": "미야자키(KMI)",
-        "다카마쓰": "다카마쓰(TAK)",
-        "센다이": "센다이(SDJ)",
-        "아오모리": "아오모리(AOJ)",
-        "시즈오카": "시즈오카(FSZ)",
-        "니가타": "니가타(KIJ)",
-        "오카야마": "오카야마(OKJ)",
-        "요나고": "요나고(YGJ)",
-        "기타큐슈": "기타큐슈(KKJ)",
-        "이시가키": "이시가키(ISG)",
-        "나가사키": "나가사키(NGS)",
-    }
-
-    return name_map.get(value, value)
+    return value
 
 
 def inject_global_style():
@@ -159,16 +114,20 @@ def render_metric_card(title, value, caption=""):
 def get_risk_color(risk_level):
     if risk_level == "높음":
         return "#DC2626"
+
     if risk_level == "중간":
         return "#D97706"
+
     return "#16A34A"
 
 
 def get_decision_message(risk_level):
     if risk_level == "높음":
         return "지금은 빠르게 구매를 검토하는 편이 좋습니다."
+
     if risk_level == "중간":
         return "바로 확정하기보다 가격을 조금 더 모니터링한 뒤 구매하는 편이 적절합니다."
+
     return "현재 조건에서는 급하게 구매하지 않고 조금 더 지켜봐도 됩니다."
 
 
@@ -331,35 +290,9 @@ def render_loading_overlay(stage_text):
     """
 
 
-def load_recommendation_dates(limit=5):
-    today = pd.Timestamp.today().normalize()
-
-    if HOLIDAY_PATH.exists():
-        holiday_df = pd.read_csv(HOLIDAY_PATH, encoding="utf-8-sig")
-        holiday_df["holiday_date"] = pd.to_datetime(
-            holiday_df["holiday_date"],
-            errors="coerce",
-        )
-
-        future_holidays = (
-            holiday_df[holiday_df["holiday_date"] >= today]
-            .dropna(subset=["holiday_date"])
-            .sort_values("holiday_date")
-            .drop_duplicates(subset=["holiday_date"])
-        )
-
-        dates = future_holidays["holiday_date"].head(limit).tolist()
-
-        if len(dates) >= limit:
-            return dates
-
-    return [today + timedelta(days=30 + i * 14) for i in range(limit)]
-
-
 def build_buy_now_recommendations(df, limit=5):
     current_year = pd.Timestamp.today().year
     available_years = sorted(df["year"].dropna().astype(int).unique().tolist())
-
     usable_years = [year for year in available_years if year <= current_year]
 
     if usable_years:
@@ -394,7 +327,8 @@ def build_buy_now_recommendations(df, limit=5):
         .copy()
     )
 
-    recommendation_dates = load_recommendation_dates(limit)
+    today = pd.Timestamp.today().normalize()
+    recommendation_dates = [today + timedelta(days=30 + i * 14) for i in range(limit)]
 
     rows = []
 
@@ -430,40 +364,11 @@ def render_buy_now_recommendations(df):
         st.info("추천할 수 있는 노선 데이터가 없습니다.")
         return
 
-    recommendation_df = recommendation_df[
-        [
-            "순위",
-            "추천 노선",
-            "추천 일정",
-            "위험도",
-            "구매 판단",
-        ]
-    ]
-
     st.dataframe(
         recommendation_df,
         use_container_width=True,
         hide_index=True,
     )
-
-
-def build_manual_sample_input(matched_feature, departure_airport, arrival_airport, departure_date):
-    return {
-        **matched_feature,
-        "departure_airport": matched_feature.get("departure_airport", departure_airport),
-        "arrival_airport": matched_feature.get("arrival_airport", arrival_airport),
-        "departure_date": str(departure_date),
-        "passenger_growth_rate": matched_feature.get("passenger_growth_rate", 0),
-        "flight_growth_rate": matched_feature.get("flight_growth_rate", 0),
-        "days_to_holiday": matched_feature.get("days_to_holiday", 0),
-        "holiday_name": matched_feature.get("holiday_name", ""),
-        "holiday_count": matched_feature.get("holiday_count", 0),
-        "jpy_krw_change_rate": matched_feature.get("jpy_krw_change_rate", 0),
-        "delay_rate": matched_feature.get("delay_rate", 0),
-        "cancel_count": matched_feature.get("cancel_count", 0),
-        "avg_carrier_count": matched_feature.get("avg_carrier_count", 0),
-        "avg_lcc_share": matched_feature.get("avg_lcc_share", 0),
-    }
 
 
 def render_parsed_request(parsed_request):
@@ -555,7 +460,7 @@ def render_natural_recommendations(parsed_request, recommendations, top_ai_repor
                 </div>
                 <div style="font-size: 18px; color: #374151; line-height: 1.55;">
                     AI가 사용자의 문장에서 필요한 여행 조건을 추출하고,
-                    기존 위험도 산정 로직으로 후보 노선을 비교했습니다.
+                    FastAPI 백엔드가 기존 위험도 산정 로직으로 후보 노선을 비교했습니다.
                 </div>
             </div>
         </div>
@@ -783,6 +688,7 @@ def render_analysis_result(risk_result, matched_feature, arrival_date, ai_report
         st.dataframe(factor_score_df, use_container_width=True, hide_index=True)
 
         st.markdown("### AI 2차 검토")
+
         if ai_report:
             st.markdown(ai_report)
         else:
@@ -1055,51 +961,29 @@ else:
 
                 try:
                     loading_placeholder.markdown(
-                        render_loading_overlay("선택한 노선과 여행 일정을 확인하고 있습니다."),
-                        unsafe_allow_html=True,
-                    )
-                    time.sleep(0.35)
-
-                    matched_feature = find_route_feature(
-                        df=sample_df,
-                        departure_airport=departure_airport,
-                        arrival_airport=arrival_airport,
-                        departure_date=str(departure_date),
-                        year=analysis_year,
-                    )
-
-                    loading_placeholder.markdown(
-                        render_loading_overlay("수요·공급·경쟁도·연휴 데이터를 분석하고 있습니다."),
-                        unsafe_allow_html=True,
-                    )
-                    time.sleep(0.35)
-
-                    sample_input = build_manual_sample_input(
-                        matched_feature=matched_feature,
-                        departure_airport=departure_airport,
-                        arrival_airport=arrival_airport,
-                        departure_date=departure_date,
-                    )
-
-                    risk_result = run_agent_pipeline(sample_input)
-
-                    loading_placeholder.markdown(
-                        render_loading_overlay("AI가 1차 판단 결과를 2차 검토하고 있습니다."),
-                        unsafe_allow_html=True,
-                    )
-
-                    ai_report = generate_purchase_timing_report(risk_result)
-
-                    loading_placeholder.markdown(
-                        render_loading_overlay("분석 결과 화면을 준비하고 있습니다."),
+                        render_loading_overlay("FastAPI 백엔드에 분석 요청을 보내고 있습니다."),
                         unsafe_allow_html=True,
                     )
                     time.sleep(0.25)
 
-                    st.session_state["analysis_result"] = risk_result
-                    st.session_state["matched_feature"] = matched_feature
+                    api_response = analyze_route_via_api(
+                        departure_airport=departure_airport,
+                        arrival_airport=arrival_airport,
+                        departure_date=str(departure_date),
+                        arrival_date=str(arrival_date),
+                        year=analysis_year,
+                    )
+
+                    loading_placeholder.markdown(
+                        render_loading_overlay("백엔드 분석 결과를 화면에 표시할 준비를 하고 있습니다."),
+                        unsafe_allow_html=True,
+                    )
+                    time.sleep(0.25)
+
+                    st.session_state["analysis_result"] = api_response["risk_result"]
+                    st.session_state["matched_feature"] = api_response["matched_feature"]
                     st.session_state["arrival_date"] = str(arrival_date)
-                    st.session_state["ai_report"] = ai_report
+                    st.session_state["ai_report"] = api_response["ai_report"]
                     st.session_state["last_selected_key"] = current_selected_key
 
                     loading_placeholder.empty()
@@ -1138,8 +1022,8 @@ else:
         with guide_col3:
             render_metric_card(
                 "3단계",
-                "구매 판단 확인",
-                "가격 상승 위험도와 구매 타이밍을 확인합니다.",
+                "API 기반 분석",
+                "FastAPI 백엔드가 위험도와 구매 타이밍을 분석합니다.",
             )
 
         st.markdown("<div style='height: 44px;'></div>", unsafe_allow_html=True)
@@ -1160,31 +1044,13 @@ else:
 
                 try:
                     loading_placeholder.markdown(
-                        render_loading_overlay("AI가 텍스트 입력에서 여행 조건을 추출하고 있습니다."),
+                        render_loading_overlay("FastAPI 백엔드에 텍스트 추천 요청을 보내고 있습니다."),
                         unsafe_allow_html=True,
                     )
 
-                    parsed_request = parse_travel_request(natural_text)
-                    parsed_request = complete_parsed_request(parsed_request)
-
-                    loading_placeholder.markdown(
-                        render_loading_overlay("추출된 조건으로 가능한 여행 일정 후보를 만들고 있습니다."),
-                        unsafe_allow_html=True,
-                    )
-                    time.sleep(0.35)
-
-                    recommendations = recommend_routes_from_request(
-                        df=sample_df,
-                        parsed_request=parsed_request,
-                    )
-
-                    loading_placeholder.markdown(
-                        render_loading_overlay("추천 1순위 결과를 AI가 2차 검토하고 있습니다."),
-                        unsafe_allow_html=True,
-                    )
-
-                    top_ai_report = generate_purchase_timing_report(
-                        recommendations[0]["risk_result"]
+                    api_response = recommend_text_via_api(
+                        text=natural_text,
+                        recommendation_count=5,
                     )
 
                     loading_placeholder.markdown(
@@ -1193,9 +1059,9 @@ else:
                     )
                     time.sleep(0.25)
 
-                    st.session_state["parsed_request"] = parsed_request
-                    st.session_state["natural_recommendations"] = recommendations
-                    st.session_state["top_ai_report"] = top_ai_report
+                    st.session_state["parsed_request"] = api_response["parsed_request"]
+                    st.session_state["natural_recommendations"] = api_response["recommendations"]
+                    st.session_state["top_ai_report"] = api_response["top_ai_report"]
 
                     loading_placeholder.empty()
                     st.rerun()
@@ -1219,15 +1085,15 @@ else:
         with guide_col2:
             render_metric_card(
                 "2단계",
-                "AI 조건 추출",
-                "여행 가능 기간, 체류일수, 목적지를 추출합니다.",
+                "API 요청",
+                "Streamlit 화면이 FastAPI 백엔드에 분석을 요청합니다.",
             )
 
         with guide_col3:
             render_metric_card(
                 "3단계",
                 "추천 결과 확인",
-                "후보 노선별 위험도와 구매 판단을 비교합니다.",
+                "백엔드 응답 결과를 화면에서 확인합니다.",
             )
 
 
@@ -1238,6 +1104,7 @@ with st.expander("분석 기준 보기", expanded=False):
         """
 - 직접 선택 모드: 사용자가 출발지, 도착지, 출발일, 도착일을 직접 입력합니다.
 - 텍스트 입력 모드: AI가 사용자의 문장에서 여행 조건을 추출합니다.
+- 백엔드 처리: Streamlit 화면은 FastAPI API에 분석 요청을 보내고, FastAPI가 위험도 분석 결과를 JSON으로 반환합니다.
 - 포함 조건: 크리스마스, 추석, 설날 등 사용자가 언급한 특정 날짜·공휴일이 여행 기간 안에 포함되도록 일정 후보를 필터링합니다.
 - 항공 수요: 노선별 여객 증가율
 - 운항 공급: 노선별 운항편 증가율
