@@ -9,7 +9,7 @@ url = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDe
 
 rows = []
 
-for year in range(2022, 2027):      # 2022~2026년
+for year in range(2020, 2027):      # 2020~2026년
     for month in range(1, 13):      # 1~12월
         params = {
             "solYear": str(year),
